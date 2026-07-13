@@ -258,9 +258,40 @@ input, select, textarea { font-family: inherit; }
 .badge-ok { background: rgba(52,199,138,0.1); color: var(--success); }
 .badge-danger { background: rgba(242,109,109,0.1); color: var(--danger); }
 
-.toast {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-  background: #1e222b; border: 1px solid rgba(52,199,138,0.5); padding: 12px 20px; border-radius: 9px;
-  font-size: 14px; font-weight: 500; z-index: 100; color: var(--text);
+.toast-stack {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 8px; z-index: 1000;
+  align-items: center; pointer-events: none; width: min(420px, calc(100% - 32px));
 }
+.toast {
+  background: #1e222b; border: 1px solid rgba(52,199,138,0.5); padding: 12px 20px; border-radius: 9px;
+  font-size: 14px; font-weight: 500; color: var(--text);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  opacity: 0; transform: translateY(-12px);
+  animation: toast-in 0.18s ease-out forwards;
+}
+.toast.toast-hide { animation: toast-out 0.18s ease-in forwards; }
+.toast-icon { font-weight: 700; }
 .toast-error { border-color: rgba(242,109,109,0.5); }
+.toast-error .toast-icon { color: var(--danger); }
+.toast:not(.toast-error) .toast-icon { color: var(--success); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toast-out { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-12px); } }
+
+.save-status {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-faint);
+}
+.save-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); transition: 0.15s;
+}
+.save-status[data-state="saving"] .save-status-dot { background: var(--accent); animation: save-pulse 0.9s infinite; }
+.save-status[data-state="saving"] .save-status-text { color: var(--accent); }
+.save-status[data-state="saved"] .save-status-dot { background: var(--success); }
+.save-status[data-state="saved"] .save-status-text { color: var(--success); }
+.save-status[data-state="error"] .save-status-dot { background: var(--danger); }
+.save-status[data-state="error"] .save-status-text { color: var(--danger); }
+@keyframes save-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

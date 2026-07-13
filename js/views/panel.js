@@ -20,12 +20,27 @@ let state = {
   saving: false,
 };
 
+function getToastStack() {
+  let stack = document.getElementById("toast-stack");
+  if (!stack) {
+    stack = document.createElement("div");
+    stack.id = "toast-stack";
+    stack.className = "toast-stack";
+    document.body.appendChild(stack);
+  }
+  return stack;
+}
+
 function toast(msg, type = "success") {
+  const stack = getToastStack();
   const el = document.createElement("div");
   el.className = `toast ${type === "error" ? "toast-error" : ""}`;
-  el.textContent = msg;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 2400);
+  el.innerHTML = `<span class="toast-icon">${type === "error" ? "✕" : "✓"}</span><span>${escapeHtml(msg)}</span>`;
+  stack.appendChild(el);
+  setTimeout(() => {
+    el.classList.add("toast-hide");
+    setTimeout(() => el.remove(), 200);
+  }, 2600);
 }
 
 async function loadChat(chatId) {
@@ -384,7 +399,7 @@ function toggleFieldHtml(key, label, checked) {
 }
 
 function saveButtonHtml() {
-  return `<button type="submit" class="btn btn-primary mt-lg">Сохранить</button>`;
+  return `<div class="save-status mt-lg" id="save-status" data-state="idle"><span class="save-status-dot"></span><span class="save-status-text">Изменения сохраняются автоматически</span></div>`;
 }
 
 function escapeHtml(str) {
@@ -402,8 +417,22 @@ function collectFormData(form) {
   return data;
 }
 
+function setSaveStatus(form, state_) {
+  // state_: "saving" | "saved" | "error" | "idle"
+  const el = form.querySelector("#save-status");
+  if (!el) return;
+  el.dataset.state = state_;
+  const text = el.querySelector(".save-status-text");
+  if (!text) return;
+  if (state_ === "saving") text.textContent = "Сохранение…";
+  else if (state_ === "saved") text.textContent = "Сохранено";
+  else if (state_ === "error") text.textContent = "Не удалось сохранить";
+  else text.textContent = "Изменения сохраняются автоматически";
+}
+
 async function saveSection(section, form) {
   const body = collectFormData(form);
+  setSaveStatus(form, "saving");
   try {
     let updated;
     if (section === "antiraid") updated = await api.patchAntiRaid(state.selectedId, body);
@@ -413,11 +442,57 @@ async function saveSection(section, form) {
 
     const sectionKey = section === "nsfw" ? "antinsfw" : section === "antiraid" ? "anti_raid" : section;
     state.settings[sectionKey] = updated;
-    toast("Настройки сохранены");
+    setSaveStatus(form, "saved");
+    toast(`${SECTION_LABELS[section] || "Настройки"}: сохранено`);
+    setTimeout(() => setSaveStatus(form, "idle"), 1800);
   } catch (e) {
     console.error(e);
-    toast("Ошибка сохранения", "error");
+    setSaveStatus(form, "error");
+    const msg = e instanceof ApiError && e.data && e.data.error ? e.data.error : "не удалось сохранить";
+    toast(`${SECTION_LABELS[section] || "Настройки"}: ${msg}`, "error");
   }
+}
+
+const SECTION_LABELS = {
+  antiraid: "Антирейд",
+  antispam: "Антиспам",
+  nsfw: "Защита 18+",
+  ai: "ИИ модератор",
+};
+
+// Debounced autosave: checkboxes/selects save instantly on change,
+// text/number inputs debounce a bit after the user stops typing so we don't
+// spam a PATCH request per keystroke.
+const AUTOSAVE_DEBOUNCE_MS = 500;
+const autosaveTimers = new WeakMap();
+
+function scheduleAutosave(section, form, immediate) {
+  if (immediate) {
+    clearTimeout(autosaveTimers.get(form));
+    autosaveTimers.delete(form);
+    saveSection(section, form);
+    return;
+  }
+  clearTimeout(autosaveTimers.get(form));
+  const timer = setTimeout(() => {
+    autosaveTimers.delete(form);
+    saveSection(section, form);
+  }, AUTOSAVE_DEBOUNCE_MS);
+  autosaveTimers.set(form, timer);
+}
+
+function attachAutosave(form) {
+  const section = form.dataset.section;
+  form.querySelectorAll("[data-field]").forEach((el) => {
+    const immediate = el.type === "checkbox" || el.tagName === "SELECT";
+    const eventName = immediate ? "change" : "input";
+    el.addEventListener(eventName, () => scheduleAutosave(section, form, immediate));
+    // number/text inputs also save on blur so a value survives even if the
+    // user clicks away before the debounce timer fires.
+    if (!immediate) {
+      el.addEventListener("blur", () => scheduleAutosave(section, form, true));
+    }
+  });
 }
 
 function bindEvents(root) {
@@ -454,10 +529,11 @@ function bindEvents(root) {
 
   const form = root.querySelector("#tab-content form");
   if (form) {
-    form.addEventListener("submit", (e) => {
-      e.preventDefault();
-      saveSection(form.dataset.section, form);
-    });
+    // No explicit save button anymore -- every field autosaves as soon as
+    // it changes (see attachAutosave). Still guard against accidental
+    // Enter-key submits inside text inputs.
+    form.addEventListener("submit", (e) => e.preventDefault());
+    attachAutosave(form);
 
     if (state.activeTab === "antiraid") loadRaidStatus();
 
