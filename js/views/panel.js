@@ -304,7 +304,7 @@ function aiTabHtml(v) {
 
   return `
     <form class="card" id="form-ai" data-section="ai">
-      ${cardHeader("ИИ модератор(ПОКА ЧТО НЕ РАБОТАЕТ)", "Модерация сообщений и общение с помощью ИИ.", v.ai_enabled, "ai_enabled")}
+      ${cardHeader("ИИ модератор", "Настройка пока что не работает", v.ai_enabled, "ai_enabled")}
 
       <div class="field">
         <label>Личность / стиль общения</label>
