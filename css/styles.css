@@ -16,16 +16,34 @@
 
 * { box-sizing: border-box; }
 
+:root {
+  /* Реальная высота видимой области Telegram Mini App, обновляется из
+     js/telegram-viewport.js (событие viewportChanged). Вне Telegram падает
+     на 100vh/100dvh браузера. Без этого верстка была завязана на 100vh,
+     который не совпадает с фактическим WebView Telegram — при разворачивании
+     мини-аппа интерфейс "сжимался" под старую высоту и появлялись лишние
+     скроллы у html/body. */
+  --tg-vh: 100dvh;
+}
+
 html, body {
   margin: 0;
   padding: 0;
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Inter, sans-serif;
-  min-height: 100vh;
+  height: var(--tg-vh);
+  /* Внешний скролл убран специально: страница целиком занимает высоту
+     мини-аппа, а прокручиваются только внутренние области (.main, .chat-list),
+     см. ниже. Это устраняет "двойной" скролл и дёрганье интерфейса. */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
-#app { min-height: 100vh; }
+#app {
+  height: var(--tg-vh);
+  overflow: hidden;
+}
 
 button { font-family: inherit; cursor: pointer; }
 input, select, textarea { font-family: inherit; }
@@ -56,7 +74,8 @@ input, select, textarea { font-family: inherit; }
 
 /* ---------------- Login ---------------- */
 .login-screen {
-  min-height: 100vh;
+  height: var(--tg-vh);
+  overflow-y: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -76,9 +95,13 @@ input, select, textarea { font-family: inherit; }
 
 /* ---------------- Shell ---------------- */
 .app-shell {
-  min-height: 100vh;
+  height: var(--tg-vh);
   display: grid;
   grid-template-columns: 1fr;
+  /* Внешний контейнер больше не скроллится сам — скроллятся только .main и
+     .chat-list внутри него. Так фиксированная высота мини-аппа никогда не
+     "съезжает" при появлении контента. */
+  overflow: hidden;
 }
 @media (min-width: 768px) {
   .app-shell { grid-template-columns: 268px 1fr; }
@@ -93,14 +116,15 @@ input, select, textarea { font-family: inherit; }
   flex-direction: column;
   gap: 18px;
   position: fixed;
-  left: 0; top: 0; height: 100vh; width: 268px;
+  left: 0; top: 0; height: var(--tg-vh); width: 268px;
   transform: translateX(-100%);
   transition: transform 0.2s;
   z-index: 50;
+  overflow: hidden;
 }
 .sidebar.open { transform: translateX(0); }
 @media (min-width: 768px) {
-  .sidebar { position: sticky; transform: none; }
+  .sidebar { position: sticky; transform: none; height: var(--tg-vh); }
   .sidebar-backdrop { display: none !important; }
 }
 
@@ -138,7 +162,15 @@ input, select, textarea { font-family: inherit; }
 .chat-sub { color: var(--text-muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------------- Main ---------------- */
-.main { padding: 16px; max-width: 1000px; width: 100%; margin: 0 auto; }
+.main {
+  padding: 16px;
+  max-width: 1000px;
+  width: 100%;
+  margin: 0 auto;
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 @media (min-width: 768px) { .main { padding: 24px 32px 60px; } }
 
 .topbar { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
