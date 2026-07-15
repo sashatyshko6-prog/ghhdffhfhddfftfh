@@ -8,7 +8,7 @@
 //
 // Если фронтенд лежит на отдельном хостинге (например, отдаётся отдельным
 // nginx/CDN), укажите полный адрес бэкенда, например:
-//   window.API_BASE_URL = "https://your-bot-domain.example.com";
+//   window.API_BASE_URL = "https://hypothesis-region-introductory-packages.trycloudflare.com";
 //
 // Значение можно также передать через query-параметр ?api_base=... при первом
 // открытии страницы — оно будет сохранено в localStorage.
