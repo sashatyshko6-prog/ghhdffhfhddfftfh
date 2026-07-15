@@ -15,7 +15,17 @@ function resolveApiBase() {
     window.history.replaceState({}, document.title, newUrl);
     return fromUrl;
   }
-  return localStorage.getItem("api_base_override") || window.API_BASE_URL || "";
+  // Если в localStorage лежит устаревший override, отличающийся от текущего
+  // адреса в config.js, он молча "маскирует" любые обновления config.js
+  // навсегда (например, после смены cloudflare-туннеля бэкенда).
+  // Поэтому override используем только если он совпадает с текущим
+  // window.API_BASE_URL или если window.API_BASE_URL не задан вовсе.
+  const override = localStorage.getItem("api_base_override");
+  if (override && window.API_BASE_URL && override !== window.API_BASE_URL) {
+    localStorage.removeItem("api_base_override");
+    return window.API_BASE_URL;
+  }
+  return override || window.API_BASE_URL || "";
 }
 
 const API_BASE = resolveApiBase();
