@@ -8,11 +8,11 @@
 //
 // Если фронтенд лежит на отдельном хостинге (например, отдаётся отдельным
 // nginx/CDN), укажите полный адрес бэкенда, например:
-//   window.API_BASE_URL = "https://hypothesis-region-introductory-packages.trycloudflare.com";
+//   window.API_BASE_URL = "https://your-bot-domain.example.com";
 //
 // Значение можно также передать через query-параметр ?api_base=... при первом
 // открытии страницы — оно будет сохранено в localStorage.
-window.API_BASE_URL = "https://firewall-general-casting-learners.trycloudflare.com";
+window.API_BASE_URL = "https://confidence-scenic-sally-brass.trycloudflare.com";
 
 // Username Telegram-бота (без @) — нужен для Telegram Login Widget на /login.
 window.TELEGRAM_BOT_USERNAME = "defende125_bot";

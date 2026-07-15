@@ -15,17 +15,7 @@ function resolveApiBase() {
     window.history.replaceState({}, document.title, newUrl);
     return fromUrl;
   }
-  // Если в localStorage лежит устаревший override, отличающийся от текущего
-  // адреса в config.js, он молча "маскирует" любые обновления config.js
-  // навсегда (например, после смены cloudflare-туннеля бэкенда).
-  // Поэтому override используем только если он совпадает с текущим
-  // window.API_BASE_URL или если window.API_BASE_URL не задан вовсе.
-  const override = localStorage.getItem("api_base_override");
-  if (override && window.API_BASE_URL && override !== window.API_BASE_URL) {
-    localStorage.removeItem("api_base_override");
-    return window.API_BASE_URL;
-  }
-  return override || window.API_BASE_URL || "";
+  return localStorage.getItem("api_base_override") || window.API_BASE_URL || "";
 }
 
 const API_BASE = resolveApiBase();
@@ -100,4 +90,12 @@ export const api = {
   setAiApiKey: (chatId, provider, apiKey) =>
     request("POST", `/api/chats/${chatId}/ai/api-key`, { provider, api_key: apiKey }),
   deleteAiApiKey: (chatId, provider) => request("DELETE", `/api/chats/${chatId}/ai/api-key/${provider}`),
+
+  // --- ai moderator (separate feature from the chat-personality AI above) --
+  getAiModerator: (chatId) => request("GET", `/api/chats/${chatId}/ai-moderator`),
+  patchAiModerator: (chatId, body) => request("PATCH", `/api/chats/${chatId}/ai-moderator`, body),
+  setAiModeratorKey: (chatId, provider, apiKey) =>
+    request("POST", `/api/chats/${chatId}/ai-moderator/api-key`, { provider, api_key: apiKey }),
+  deleteAiModeratorKey: (chatId, provider) =>
+    request("DELETE", `/api/chats/${chatId}/ai-moderator/api-key/${provider}`),
 };

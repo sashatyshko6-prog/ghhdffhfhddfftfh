@@ -17,6 +17,11 @@
        initData недоступна, и авто-логин/подтяжка данных в мини-аппе не работает -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 
+  <!-- Синхронизирует --tg-vh с реальной высотой WebView ДО первого рендера --
+       фиксит "сжатие" интерфейса и лишние скроллы в мини-аппе. Должен идти
+       после SDK и до main.js. -->
+  <script src="js/telegram-viewport.js"></script>
+
   <!-- Config: точка входа для настройки адреса бэкенда, см. js/config.js -->
   <script src="js/config.js"></script>
   <script type="module" src="js/main.js"></script>

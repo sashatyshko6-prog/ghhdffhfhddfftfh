@@ -6,8 +6,19 @@ const TABS = [
   { id: "antiraid", label: "Антирейд" },
   { id: "antispam", label: "Антиспам" },
   { id: "nsfw", label: "Защита 18+" },
-  { id: "ai", label: "ИИ модератор" },
+  { id: "aimoderator", label: "ИИ модератор" },
+  { id: "ai", label: "ИИ чат" },
 ];
+
+const ANTISPAM_TYPE_LABELS = {
+  text: "Текст",
+  sticker: "Стикеры",
+  gif: "GIF/анимации",
+  photo: "Фото",
+  video: "Видео",
+  document: "Документы",
+  voice: "Голосовые/кружки",
+};
 
 let state = {
   chats: [],
@@ -157,6 +168,8 @@ function tabContentHtml() {
       return antispamTabHtml(s.antispam || {});
     case "nsfw":
       return nsfwTabHtml(s.antinsfw || {});
+    case "aimoderator":
+      return aiModeratorTabHtml(s.ai_moderator || {});
     case "ai":
       return aiTabHtml(s.ai || {});
     default:
@@ -239,6 +252,7 @@ async function loadRaidStatus() {
 // ANTISPAM
 // ---------------------------------------------------------------------------
 function antispamTabHtml(v) {
+  const types = { text: true, sticker: true, gif: true, photo: true, video: true, document: true, voice: true, ...(v.types || {}) };
   return `
     <form class="card" id="form-antispam" data-section="antispam">
       ${cardHeader("Антиспам", "Автоматическая реакция на флуд и спам-сообщения.", v.enabled)}
@@ -249,17 +263,34 @@ function antispamTabHtml(v) {
         <div class="field">
           <label>Наказание</label>
           <select class="input" data-field="punishment">
-            ${["мут", "кик", "бан"].map((p) => `<option value="${p}" ${v.punishment === p ? "selected" : ""}>${p}</option>`).join("")}
+            ${["мут", "бан"].map((p) => `<option value="${p}" ${v.punishment === p ? "selected" : ""}>${p}</option>`).join("")}
           </select>
         </div>
         <div class="field"><label>Длительность</label><input type="number" class="input" data-field="duration" value="${v.duration ?? 30}" /></div>
         <div class="field">
           <label>Единица</label>
           <select class="input" data-field="unit">
-            ${["сек", "мин", "час", "дней"].map((u) => `<option value="${u}" ${v.unit === u ? "selected" : ""}>${u}</option>`).join("")}
+            ${["сек", "мин", "час", "день"].map((u) => `<option value="${u}" ${v.unit === u ? "selected" : ""}>${u}</option>`).join("")}
           </select>
         </div>
       </div>
+
+      <div class="section-label mt-lg">Реакция по типам сообщений</div>
+      <div class="grid-2">
+        ${Object.entries(ANTISPAM_TYPE_LABELS)
+          .map(([key, label]) => `
+            <div class="toggle-field">
+              <label>${label}</label>
+              <label class="switch">
+                <input type="checkbox" data-type-field="${key}" ${types[key] ? "checked" : ""} />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>`)
+          .join("")}
+      </div>
+
+      <div class="grid-2 mt">${toggleFieldHtml("test_mode", "Тестовый режим (только уведомления, без наказаний)", v.test_mode)}</div>
+
       ${saveButtonHtml()}
     </form>
   `;
@@ -276,14 +307,14 @@ function nsfwTabHtml(v) {
         <div class="field">
           <label>Наказание</label>
           <select class="input" data-field="punishment">
-            ${["мут", "кик", "бан"].map((p) => `<option value="${p}" ${v.punishment === p ? "selected" : ""}>${p}</option>`).join("")}
+            ${["мут", "бан"].map((p) => `<option value="${p}" ${v.punishment === p ? "selected" : ""}>${p}</option>`).join("")}
           </select>
         </div>
         <div class="field"><label>Длительность</label><input type="number" class="input" data-field="duration" value="${v.duration ?? 30}" /></div>
         <div class="field">
           <label>Единица</label>
           <select class="input" data-field="unit">
-            ${["сек", "мин", "час", "дней"].map((u) => `<option value="${u}" ${v.unit === u ? "selected" : ""}>${u}</option>`).join("")}
+            ${["сек", "мин", "час", "день"].map((u) => `<option value="${u}" ${v.unit === u ? "selected" : ""}>${u}</option>`).join("")}
           </select>
         </div>
       </div>
@@ -293,7 +324,8 @@ function nsfwTabHtml(v) {
 }
 
 // ---------------------------------------------------------------------------
-// AI (includes AI moderator: enabled + personality/custom prompt)
+// AI ЧАТ (личность/промпт для обычных ответов бота -- НЕ модератор, см.
+// aiModeratorTabHtml ниже для настоящей ИИ-модерации).
 // ---------------------------------------------------------------------------
 function aiTabHtml(v) {
   const providers = state.aiProviders.length
@@ -304,7 +336,7 @@ function aiTabHtml(v) {
 
   return `
     <form class="card" id="form-ai" data-section="ai">
-      ${cardHeader("ИИ модератор", "Настройка пока что не работает", v.ai_enabled, "ai_enabled")}
+      ${cardHeader("ИИ чат", "Личность и провайдер ИИ для обычных ответов бота в чате.", v.ai_enabled, "ai_enabled")}
 
       <div class="field">
         <label>Личность / стиль общения</label>
@@ -341,6 +373,61 @@ function aiTabHtml(v) {
 
       ${saveButtonHtml()}
       ${moderatorsHtml()}
+    </form>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// ИИ МОДЕРАТОР (bot/handlers/ai_moderator.py) -- отдельная от "ИИ чат" фича:
+// автоматически читает сообщения и сам решает warn/delete/mute/ban по
+// заданным правилам. Раньше эта вкладка на самом деле сохраняла настройки
+// личности/провайдера обычного чат-бота, поэтому переключатель тут ничего
+// не включал -- теперь бьётся в свой собственный набор эндпоинтов.
+// ---------------------------------------------------------------------------
+function aiModeratorTabHtml(v) {
+  const providerLabels = { auto: "Авто", github: "GitHub Models", laozhang: "LaoZhang" };
+  const hasAnyKey = !!(v.has_github_key || v.has_laozhang_key);
+  return `
+    <form class="card" id="form-aimoderator" data-section="aimoderator">
+      ${cardHeader("ИИ модератор", "ИИ читает сообщения чата и сам применяет предупреждение, удаление, мут или бан по заданным правилам.", v.enabled)}
+
+      ${!hasAnyKey ? `<p class="hint" style="text-align:left;margin-bottom:16px;">⚠️ Добавьте хотя бы один API-ключ ниже, иначе включить ИИ-модератора не получится.</p>` : ""}
+
+      <div class="field">
+        <label>Правила модерации</label>
+        <textarea class="input textarea" data-field="rules" rows="5" placeholder="Запрещены: оскорбления, мат, флуд/спам, реклама, NSFW-контент…">${escapeHtml(v.rules || "")}</textarea>
+      </div>
+
+      <div class="grid-2 mt">
+        <div class="field"><label>Кулдаун между проверками (сек)</label><input type="number" min="0" class="input" data-field="cooldown_seconds" value="${v.cooldown_seconds ?? 2}" /></div>
+        <div class="field">
+          <label>Провайдер ИИ</label>
+          <select class="input" data-field="provider">
+            ${Object.entries(providerLabels).map(([id, label]) => `<option value="${id}" ${v.provider === id ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field"><label>Модель GitHub Models</label><input type="text" class="input" data-field="github_model" value="${escapeHtml(v.github_model || "gpt-4o")}" /></div>
+      </div>
+
+      <div class="field mt">
+        <label>Ключ GitHub Models ${v.has_github_key ? '<span class="hint">(сохранён)</span>' : ""}</label>
+        <div class="key-row">
+          <input type="password" class="input" id="aimod-github-key-input" placeholder="${v.has_github_key ? "••••••••" : "ghp_… / github_pat_…"}" />
+          <button type="button" class="btn btn-secondary" id="aimod-save-github-key">Сохранить</button>
+          ${v.has_github_key ? `<button type="button" class="btn btn-danger" id="aimod-delete-github-key">Удалить</button>` : ""}
+        </div>
+      </div>
+
+      <div class="field mt">
+        <label>Ключ LaoZhang ${v.has_laozhang_key ? '<span class="hint">(сохранён)</span>' : ""}</label>
+        <div class="key-row">
+          <input type="password" class="input" id="aimod-laozhang-key-input" placeholder="${v.has_laozhang_key ? "••••••••" : "sk-… / lz-…"}" />
+          <button type="button" class="btn btn-secondary" id="aimod-save-laozhang-key">Сохранить</button>
+          ${v.has_laozhang_key ? `<button type="button" class="btn btn-danger" id="aimod-delete-laozhang-key">Удалить</button>` : ""}
+        </div>
+      </div>
+
+      ${saveButtonHtml()}
     </form>
   `;
 }
@@ -414,6 +501,18 @@ function collectFormData(form) {
     else if (el.type === "number") data[key] = Number(el.value);
     else data[key] = el.value;
   });
+  // Per-type toggles (antispam: text/sticker/gif/photo/video/document/voice)
+  // are nested under a single "types" object server-side, not top-level
+  // fields, so they use a separate data-type-field attribute and get folded
+  // into data.types here.
+  const typeEls = form.querySelectorAll("[data-type-field]");
+  if (typeEls.length) {
+    const types = {};
+    typeEls.forEach((el) => {
+      types[el.dataset.typeField] = el.checked;
+    });
+    data.types = types;
+  }
   return data;
 }
 
@@ -439,8 +538,10 @@ async function saveSection(section, form) {
     else if (section === "antispam") updated = await api.patchAntispam(state.selectedId, body);
     else if (section === "nsfw") updated = await api.patchAntinsfw(state.selectedId, body);
     else if (section === "ai") updated = await api.patchAi(state.selectedId, body);
+    else if (section === "aimoderator") updated = await api.patchAiModerator(state.selectedId, body);
 
-    const sectionKey = section === "nsfw" ? "antinsfw" : section === "antiraid" ? "anti_raid" : section;
+    const sectionKey =
+      section === "nsfw" ? "antinsfw" : section === "antiraid" ? "anti_raid" : section === "aimoderator" ? "ai_moderator" : section;
     state.settings[sectionKey] = updated;
     setSaveStatus(form, "saved");
     toast(`${SECTION_LABELS[section] || "Настройки"}: сохранено`);
@@ -457,7 +558,8 @@ const SECTION_LABELS = {
   antiraid: "Антирейд",
   antispam: "Антиспам",
   nsfw: "Защита 18+",
-  ai: "ИИ модератор",
+  ai: "ИИ чат",
+  aimoderator: "ИИ модератор",
 };
 
 // Debounced autosave: checkboxes/selects save instantly on change,
@@ -483,7 +585,7 @@ function scheduleAutosave(section, form, immediate) {
 
 function attachAutosave(form) {
   const section = form.dataset.section;
-  form.querySelectorAll("[data-field]").forEach((el) => {
+  form.querySelectorAll("[data-field], [data-type-field]").forEach((el) => {
     const immediate = el.type === "checkbox" || el.tagName === "SELECT";
     const eventName = immediate ? "change" : "input";
     el.addEventListener(eventName, () => scheduleAutosave(section, form, immediate));
@@ -572,6 +674,37 @@ function bindEvents(root) {
           toast("Не удалось удалить ключ", "error");
         }
       });
+    }
+
+    if (state.activeTab === "aimoderator") {
+      const setAimodKey = async (provider, inputId) => {
+        const input = form.querySelector(`#${inputId}`);
+        const key = input?.value.trim();
+        if (!key) return toast("Введите API-ключ", "error");
+        try {
+          const updated = await api.setAiModeratorKey(state.selectedId, provider, key);
+          state.settings.ai_moderator = updated;
+          toast("Ключ сохранён");
+          paint(root);
+        } catch {
+          toast("Не удалось сохранить ключ", "error");
+        }
+      };
+      const deleteAimodKey = async (provider) => {
+        try {
+          const updated = await api.deleteAiModeratorKey(state.selectedId, provider);
+          state.settings.ai_moderator = updated;
+          toast("Ключ удалён");
+          paint(root);
+        } catch {
+          toast("Не удалось удалить ключ", "error");
+        }
+      };
+
+      form.querySelector("#aimod-save-github-key")?.addEventListener("click", () => setAimodKey("github", "aimod-github-key-input"));
+      form.querySelector("#aimod-delete-github-key")?.addEventListener("click", () => deleteAimodKey("github"));
+      form.querySelector("#aimod-save-laozhang-key")?.addEventListener("click", () => setAimodKey("laozhang", "aimod-laozhang-key-input"));
+      form.querySelector("#aimod-delete-laozhang-key")?.addEventListener("click", () => deleteAimodKey("laozhang"));
     }
   }
 }
