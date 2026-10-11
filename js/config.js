@@ -12,7 +12,7 @@
 //
 // Значение можно также передать через query-параметр ?api_base=... при первом
 // открытии страницы — оно будет сохранено в localStorage.
-window.API_BASE_URL = "https://success-charging-tee-takes.trycloudflare.com";
+window.API_BASE_URL = "https://britney-thee-defines-livestock.trycloudflare.com";
 
 // Username Telegram-бота (без @) — нужен для Telegram Login Widget на /login.
 window.TELEGRAM_BOT_USERNAME = "defende125_bot";
