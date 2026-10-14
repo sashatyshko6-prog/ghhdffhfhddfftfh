@@ -38,7 +38,8 @@ export class ApiError extends Error {
 }
 
 async function request(method, path, body) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
@@ -72,7 +73,8 @@ export const api = {
   me: () => request("GET", "/api/auth/me"),
 
   // --- chats ----------------------------------------------------------------
-  listChats: () => request("GET", "/api/chats"),
+  listChats: ({ includeSettings = false } = {}) =>
+    request("GET", `/api/chats${includeSettings ? "?include_settings=1" : ""}`),
   getChat: (chatId) => request("GET", `/api/chats/${chatId}`),
   listModerators: (chatId) => request("GET", `/api/chats/${chatId}/moderators`),
   getSettings: (chatId) => request("GET", `/api/chats/${chatId}/settings`),

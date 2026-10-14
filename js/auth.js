@@ -4,7 +4,26 @@
 // ----------------------------------------------------------------------------
 import { api, getToken, setToken, ApiError } from "./api.js";
 
+const USER_KEY = "panel_user";
 let currentUser = null;
+
+function rememberUser(user) {
+  currentUser = user;
+  try {
+    localStorage.setItem(USER_KEY, JSON.stringify(user));
+  } catch {
+    // Storage being unavailable must not block a successful sign-in.
+  }
+}
+
+function forgetRememberedUser() {
+  currentUser = null;
+  try {
+    localStorage.removeItem(USER_KEY);
+  } catch {
+    // The token is still cleared even if storage is unavailable.
+  }
+}
 
 export function getCurrentUser() {
   return currentUser;
@@ -28,16 +47,30 @@ export function getTelegramWebApp() {
   return window.Telegram?.WebApp || null;
 }
 
-/** Проверяет сохранённый токен на сервере. Возвращает true, если сессия жива. */
+/** Reuses the cached profile immediately; protected API requests still verify
+ * the bearer token on the server. Older sessions fetch /me once to populate it. */
 export async function restoreSession() {
   const token = getToken();
   if (!token) return false;
+
+  if (!currentUser) {
+    try {
+      currentUser = JSON.parse(localStorage.getItem(USER_KEY) || "null");
+    } catch {
+      currentUser = null;
+    }
+  }
+  if (currentUser) return true;
+
   try {
     const user = await api.me();
-    currentUser = user;
+    rememberUser(user);
     return true;
   } catch (e) {
-    if (e instanceof ApiError) setToken(null);
+    if (e instanceof ApiError) {
+      setToken(null);
+      forgetRememberedUser();
+    }
     return false;
   }
 }
@@ -56,7 +89,7 @@ export async function tryMiniAppLogin() {
   try {
     const { token, user } = await api.authTelegramWebapp(tg.initData);
     setToken(token);
-    currentUser = user;
+    rememberUser(user);
     tg.ready();
     tg.expand();
     return { ok: true };
@@ -87,7 +120,7 @@ export async function tryWidgetRedirectLogin() {
   try {
     const { token, user } = await api.authTelegramWidget(payload);
     setToken(token);
-    currentUser = user;
+    rememberUser(user);
     window.history.replaceState({}, document.title, window.location.pathname);
     return true;
   } catch (e) {
@@ -98,7 +131,7 @@ export async function tryWidgetRedirectLogin() {
 
 export function logout() {
   setToken(null);
-  currentUser = null;
+  forgetRememberedUser();
 }
 
 export function injectLoginWidget(container) {
