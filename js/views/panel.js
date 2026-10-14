@@ -31,6 +31,9 @@ let state = {
   saving: false,
 };
 
+let aiProvidersPromise = null;
+const moderatorPromises = new Map();
+
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
   if (!stack) {
@@ -55,12 +58,25 @@ function toast(msg, type = "success") {
 }
 
 async function loadChat(chatId) {
-  const [settings, moderators] = await Promise.all([
-    api.getSettings(chatId),
-    api.listModerators(chatId).catch(() => []),
+  const settings = await api.getSettings(chatId);
+  if (state.selectedId === chatId) state.settings = settings;
+}
+
+async function loadAiMetadata(chatId) {
+  if (!aiProvidersPromise) {
+    aiProvidersPromise = api.listAiProviders().catch(() => []);
+  }
+  if (!moderatorPromises.has(chatId)) {
+    moderatorPromises.set(chatId, api.listModerators(chatId).catch(() => []));
+  }
+  const [providers, moderators] = await Promise.all([
+    aiProvidersPromise,
+    moderatorPromises.get(chatId),
   ]);
-  state.settings = settings;
-  state.moderators = moderators;
+  if (state.selectedId === chatId) {
+    state.aiProviders = providers;
+    state.moderators = moderators;
+  }
 }
 
 export async function renderPanel(root) {
@@ -69,14 +85,18 @@ export async function renderPanel(root) {
     return;
   }
 
+  state.chats = [];
+  state.selectedId = null;
+  state.settings = null;
+  state.moderators = [];
   root.innerHTML = `<div class="fixed-center"><div class="spinner"></div></div>`;
 
   try {
-    state.chats = await api.listChats();
-    state.aiProviders = await api.listAiProviders().catch(() => []);
+    state.chats = await api.listChats({ includeSettings: true });
     if (state.chats.length > 0) {
       state.selectedId = state.chats[0].id;
-      await loadChat(state.selectedId);
+      if (state.chats[0].settings) state.settings = state.chats[0].settings;
+      else await loadChat(state.selectedId);
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -88,6 +108,12 @@ export async function renderPanel(root) {
 
   state.loading = false;
   paint(root);
+  if (state.activeTab === "ai" && state.selectedId) {
+    const chatId = state.selectedId;
+    loadAiMetadata(chatId).then(() => {
+      if (state.activeTab === "ai" && state.selectedId === chatId) paint(root);
+    });
+  }
 }
 
 function paint(root) {
@@ -615,9 +641,13 @@ function bindEvents(root) {
 
   root.querySelectorAll(".chat-item").forEach((btn) => {
     btn.addEventListener("click", async () => {
-      state.selectedId = btn.dataset.chatId;
+      const chatId = btn.dataset.chatId;
+      state.selectedId = chatId;
+      state.settings = null;
       root.querySelector("#tab-content").innerHTML = `<div class="fixed-center-inline"><div class="spinner"></div></div>`;
-      await loadChat(state.selectedId);
+      await loadChat(chatId);
+      if (state.selectedId !== chatId) return;
+      if (state.activeTab === "ai") await loadAiMetadata(chatId);
       paint(root);
     });
   });
@@ -626,6 +656,12 @@ function bindEvents(root) {
     btn.addEventListener("click", () => {
       state.activeTab = btn.dataset.tab;
       paint(root);
+      if (state.activeTab === "ai" && state.selectedId) {
+        const chatId = state.selectedId;
+        loadAiMetadata(chatId).then(() => {
+          if (state.activeTab === "ai" && state.selectedId === chatId) paint(root);
+        });
+      }
     });
   });
 
