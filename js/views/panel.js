@@ -1566,7 +1566,13 @@ function bindEvents(root) {
     state.sendingChatIds.add(chatKey);
     state.chatSending = true;
     state.chatDraft = "";
-    paint(root);
+    const draftField = root.querySelector("#chat-draft");
+    const sendButton = root.querySelector(".chat-send");
+    if (draftField) {
+      draftField.value = "";
+      draftField.disabled = true;
+    }
+    if (sendButton) sendButton.disabled = true;
     try {
       const response = await api.sendMessage(chatId, {
         text,
@@ -1606,7 +1612,15 @@ function bindEvents(root) {
       }
       state.chatDraft = text;
       state.replyToMessage = replyMessage;
-      paint(root);
+      const restoredDraft = root.querySelector("#chat-draft");
+      const restoredSendButton = root.querySelector(".chat-send");
+      if (restoredDraft) {
+        restoredDraft.value = text;
+        restoredDraft.disabled = false;
+      }
+      if (restoredSendButton) {
+        restoredSendButton.disabled = state.chatSending || !text.trim();
+      }
       toast(error instanceof Error ? error.message : "Не удалось отправить сообщение.", "error");
     }
   });
