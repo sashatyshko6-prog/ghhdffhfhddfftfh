@@ -78,6 +78,8 @@ export const api = {
   getChat: (chatId) => request("GET", `/api/chats/${chatId}`),
   listModerators: (chatId) => request("GET", `/api/chats/${chatId}/moderators`),
   getSettings: (chatId) => request("GET", `/api/chats/${chatId}/settings`),
+  listMessages: (chatId) => request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages`),
+  sendMessage: (chatId, body) => request("POST", `/api/chats/${encodeURIComponent(chatId)}/send`, body),
 
   patchAntispam: (chatId, body) => request("PATCH", `/api/chats/${chatId}/settings/antispam`, body),
   patchAntinsfw: (chatId, body) => request("PATCH", `/api/chats/${chatId}/settings/antinsfw`, body),

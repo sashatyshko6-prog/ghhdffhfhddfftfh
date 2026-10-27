@@ -24,15 +24,25 @@ let state = {
   chats: [],
   selectedId: null,
   settings: null,
+  settingsError: "",
   moderators: [],
   aiProviders: [],
+  activeSection: "chat",
   activeTab: "antiraid",
+  messages: [],
+  messagesChatId: null,
+  messagesLoading: false,
+  messagesError: "",
+  chatDraft: "",
+  chatSending: false,
+  sendingChatIds: new Set(),
   loading: true,
   saving: false,
 };
 
 let aiProvidersPromise = null;
 const moderatorPromises = new Map();
+let chatRefreshTimer = null;
 
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
@@ -58,8 +68,63 @@ function toast(msg, type = "success") {
 }
 
 async function loadChat(chatId) {
-  const settings = await api.getSettings(chatId);
-  if (state.selectedId === chatId) state.settings = settings;
+  state.settingsError = "";
+  try {
+    const settings = await api.getSettings(chatId);
+    if (String(state.selectedId) === String(chatId)) state.settings = settings;
+  } catch (error) {
+    if (String(state.selectedId) === String(chatId)) {
+      state.settings = null;
+      state.settingsError = error instanceof Error ? error.message : "Не удалось загрузить настройки чата.";
+    }
+    throw error;
+  }
+}
+
+async function loadMessages(chatId) {
+  state.messagesChatId = String(chatId);
+  state.messages = [];
+  state.messagesLoading = true;
+  state.messagesError = "";
+  try {
+    const response = await api.listMessages(chatId);
+    const messages = Array.isArray(response) ? response : response?.messages;
+    if (!Array.isArray(messages)) throw new Error("Сервер вернул историю сообщений в неизвестном формате.");
+    if (String(state.selectedId) !== String(chatId)) return;
+    state.messages = messages;
+  } catch (error) {
+    if (String(state.selectedId) !== String(chatId)) return;
+    state.messagesError = error instanceof Error ? error.message : "Не удалось загрузить сообщения.";
+  } finally {
+    if (String(state.selectedId) === String(chatId)) state.messagesLoading = false;
+  }
+}
+
+async function refreshMessages(root, chatId) {
+  try {
+    const response = await api.listMessages(chatId);
+    const messages = Array.isArray(response) ? response : response?.messages;
+    if (!Array.isArray(messages) || String(state.selectedId) !== String(chatId)) return;
+    const currentIds = state.messages.map((message) => String(message.message_id)).join(",");
+    const nextIds = messages.map((message) => String(message.message_id)).join(",");
+    const contentChanged = currentIds !== nextIds || messages.some((message, index) => {
+      const current = state.messages[index];
+      return current && (current.text !== message.text || current.username !== message.username);
+    });
+    if (!contentChanged) return;
+
+    const history = root.querySelector("#chat-history");
+    const wasAtBottom = history && history.scrollHeight - history.clientHeight - history.scrollTop < 40;
+    const previousScrollTop = history?.scrollTop ?? 0;
+    state.messages = messages;
+    if (state.activeSection === "chat" && String(state.selectedId) === String(chatId)) {
+      paint(root);
+      const updatedHistory = root.querySelector("#chat-history");
+      if (updatedHistory) updatedHistory.scrollTop = wasAtBottom ? updatedHistory.scrollHeight : previousScrollTop;
+    }
+  } catch {
+    // Keep the last good history; the visible refresh button can report a manual retry.
+  }
 }
 
 async function loadAiMetadata(chatId) {
@@ -80,6 +145,10 @@ async function loadAiMetadata(chatId) {
 }
 
 export async function renderPanel(root) {
+  if (chatRefreshTimer) {
+    window.clearInterval(chatRefreshTimer);
+    chatRefreshTimer = null;
+  }
   if (!(await restoreSession())) {
     navigate("/login", { replace: true });
     return;
@@ -88,6 +157,14 @@ export async function renderPanel(root) {
   state.chats = [];
   state.selectedId = null;
   state.settings = null;
+  state.settingsError = "";
+  state.messages = [];
+  state.messagesChatId = null;
+  state.messagesError = "";
+  state.chatDraft = "";
+  state.chatSending = false;
+  state.sendingChatIds = new Set();
+  state.activeSection = "chat";
   state.moderators = [];
   root.innerHTML = `<div class="fixed-center"><div class="spinner"></div></div>`;
 
@@ -96,7 +173,8 @@ export async function renderPanel(root) {
     if (state.chats.length > 0) {
       state.selectedId = state.chats[0].id;
       if (state.chats[0].settings) state.settings = state.chats[0].settings;
-      else await loadChat(state.selectedId);
+      else await loadChat(state.selectedId).catch(() => {});
+      await loadMessages(state.selectedId);
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -108,16 +186,26 @@ export async function renderPanel(root) {
 
   state.loading = false;
   paint(root);
-  if (state.activeTab === "ai" && state.selectedId) {
+  if (state.selectedId !== null) {
+    chatRefreshTimer = window.setInterval(() => {
+      if (state.activeSection !== "chat" || state.selectedId === null || document.hidden) return;
+      void refreshMessages(root, state.selectedId);
+    }, 8000);
+  }
+  if (state.activeSection === "settings" && state.activeTab === "ai" && state.selectedId) {
     const chatId = state.selectedId;
     loadAiMetadata(chatId).then(() => {
-      if (state.activeTab === "ai" && state.selectedId === chatId) paint(root);
+      if (state.activeSection === "settings" && state.activeTab === "ai" && state.selectedId === chatId) paint(root);
     });
   }
 }
 
 function paint(root) {
   const user = getCurrentUser();
+  const selectedChat = state.chats.find((chat) => String(chat.id) === String(state.selectedId));
+  const pageTitle = state.activeSection === "chat"
+    ? selectedChat?.title || "Чат"
+    : TABS.find((tab) => tab.id === state.activeTab)?.label || "Настройки";
   root.innerHTML = `
     <div class="app-shell">
       <div class="sidebar-backdrop" id="backdrop" hidden></div>
@@ -148,17 +236,31 @@ function paint(root) {
       <main class="main">
         <div class="topbar">
           <button class="icon-btn mobile-only" id="menu-btn">☰</button>
-          <h1 class="page-title">${TABS.find((t) => t.id === state.activeTab)?.label || ""}</h1>
-          <div class="status-pill">Готово</div>
+          <h1 class="page-title">${escapeHtml(pageTitle)}</h1>
+          <div class="status-pill">${state.activeSection === "chat" ? "Чат с ботом" : "Настройки группы"}</div>
         </div>
 
-        <nav class="tabs">
-          ${TABS.map((t) => `<button class="tab-btn ${t.id === state.activeTab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`).join("")}
-        </nav>
+        ${state.activeSection === "settings" && state.selectedId ? `
+          <nav class="tabs" aria-label="Настройки чата">
+            ${TABS.map((t) => `<button class="tab-btn ${t.id === state.activeTab ? "active" : ""}" data-tab="${t.id}">${t.label}</button>`).join("")}
+          </nav>
+        ` : ""}
 
-        <div id="tab-content">
-          ${state.selectedId ? tabContentHtml() : emptyStateHtml()}
+        <div id="tab-content" class="${state.activeSection === "chat" ? "chat-tab-content" : ""}">
+          ${state.selectedId
+            ? state.activeSection === "chat" ? chatTabHtml() : tabContentHtml()
+            : emptyStateHtml()}
         </div>
+        ${state.selectedId ? `
+          <nav class="panel-bottom-nav" aria-label="Раздел группы">
+            <button type="button" class="section-tab ${state.activeSection === "chat" ? "active" : ""}" data-section="chat" aria-current="${state.activeSection === "chat" ? "page" : "false"}">
+              <span aria-hidden="true">💬</span><strong>Чат</strong>
+            </button>
+            <button type="button" class="section-tab ${state.activeSection === "settings" ? "active" : ""}" data-section="settings" aria-current="${state.activeSection === "settings" ? "page" : "false"}">
+              <span aria-hidden="true">⚙</span><strong>Настройки</strong>
+            </button>
+          </nav>
+        ` : ""}
       </main>
     </div>
   `;
@@ -168,13 +270,13 @@ function paint(root) {
 
 function chatItemHtml(chat) {
   const initials = (chat.title || "").slice(0, 2).toUpperCase();
-  const active = chat.id === state.selectedId;
+  const active = String(chat.id) === String(state.selectedId);
   return `
     <button class="chat-item ${active ? "active" : ""}" data-chat-id="${chat.id}">
-      <div class="chat-avatar ${active ? "chat-avatar-active" : ""}">${initials}</div>
+      <div class="chat-avatar ${active ? "chat-avatar-active" : ""}">${escapeHtml(initials)}</div>
       <div class="chat-meta">
         <div class="chat-title">${escapeHtml(chat.title)}</div>
-        <div class="chat-sub">${chat.type || "chat"}${chat.privacyAccepted === false ? " · приватность не принята" : ""}</div>
+        <div class="chat-sub">${escapeHtml(chat.type || "chat")}${chat.privacyAccepted === false ? " · приватность не принята" : ""}</div>
       </div>
     </button>
   `;
@@ -184,8 +286,69 @@ function emptyStateHtml() {
   return `<div class="card center-card"><p>Нет доступных чатов. Добавьте бота в чат и выдайте ему права администратора.</p></div>`;
 }
 
+function chatTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return escapeHtml(value);
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function chatMessageHtml(message) {
+  const name = message.sender_name || message.user_name || (message.username ? `@${message.username}` : "Участник");
+  const username = String(message.username || "").replace(/^@/, "");
+  const authorHandle = username ? `@${username}` : "username не указан";
+  const fromBot = Boolean(message.is_bot || message.is_own_bot);
+  const outgoing = Boolean(message.is_own_bot || message.is_outgoing);
+  const text = message.text || message.caption || "";
+  const body = text || `Сообщение: ${String(message.type || "без текста").replaceAll("_", " ")}`;
+
+  return `
+    <article class="chat-message ${outgoing ? "outgoing" : ""}">
+      <div class="chat-message-bubble">
+        <strong class="chat-message-name">${escapeHtml(name)}</strong>
+        <p>${escapeHtml(body)}</p>
+        ${fromBot ? `<div class="chat-message-author">Автор сообщения "${escapeHtml(name)}" (${escapeHtml(authorHandle)})</div>` : ""}
+        <time>${chatTime(message.date)}</time>
+      </div>
+    </article>
+  `;
+}
+
+function chatTabHtml() {
+  const messages = state.messagesChatId === String(state.selectedId) ? state.messages : [];
+  const content = state.messagesLoading
+    ? `<div class="chat-empty" role="status">Загрузка переписки…</div>`
+    : state.messagesError
+      ? `<div class="chat-empty chat-error" role="alert">${escapeHtml(state.messagesError)}</div>`
+      : messages.length
+        ? messages.map(chatMessageHtml).join("")
+        : `<div class="chat-empty">В этом чате пока нет сообщений. Напишите первое от имени бота.</div>`;
+
+  return `
+    <section class="group-chat" aria-label="Переписка группы">
+      <div class="chat-toolbar">
+        <span><i class="bot-status-dot"></i>Все сообщения отправляются от имени бота</span>
+        <button type="button" class="chat-refresh" data-refresh-chat>Обновить</button>
+      </div>
+      <div class="chat-history" id="chat-history" aria-live="polite">${content}</div>
+      <form class="chat-composer" id="chat-composer">
+        <textarea id="chat-draft" rows="1" maxlength="4096" ${state.chatSending ? "disabled" : ""} placeholder="Сообщение в группу…" aria-label="Сообщение группе">${escapeHtml(state.chatDraft)}</textarea>
+        <div class="chat-composer-footer">
+          <span>Enter — отправить · Shift+Enter — новая строка</span>
+          <button type="submit" class="chat-send" ${state.chatSending || !state.chatDraft.trim() ? "disabled" : ""}>
+            ${state.chatSending ? "Отправляем…" : "Отправить"}
+          </button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
 function tabContentHtml() {
   const s = state.settings;
+  if (state.settingsError) {
+    return `<div class="card center-card"><p>${escapeHtml(state.settingsError)}</p><button type="button" class="btn btn-secondary" data-retry-settings>Повторить</button></div>`;
+  }
   if (!s) return emptyStateHtml();
   switch (state.activeTab) {
     case "antiraid":
@@ -625,6 +788,10 @@ function attachAutosave(form) {
 
 function bindEvents(root) {
   root.querySelector("#logout-btn")?.addEventListener("click", () => {
+    if (chatRefreshTimer) {
+      window.clearInterval(chatRefreshTimer);
+      chatRefreshTimer = null;
+    }
     logout();
     navigate("/login", { replace: true });
   });
@@ -643,12 +810,37 @@ function bindEvents(root) {
     btn.addEventListener("click", async () => {
       const chatId = btn.dataset.chatId;
       state.selectedId = chatId;
+      state.activeSection = "chat";
       state.settings = null;
-      root.querySelector("#tab-content").innerHTML = `<div class="fixed-center-inline"><div class="spinner"></div></div>`;
-      await loadChat(chatId);
-      if (state.selectedId !== chatId) return;
-      if (state.activeTab === "ai") await loadAiMetadata(chatId);
+      state.settingsError = "";
+      state.messages = [];
+      state.messagesChatId = String(chatId);
+      state.messagesLoading = true;
+      state.messagesError = "";
+      state.chatDraft = "";
+      state.chatSending = state.sendingChatIds.has(String(chatId));
       paint(root);
+      await Promise.allSettled([loadChat(chatId), loadMessages(chatId)]);
+      if (state.selectedId !== chatId) return;
+      if (state.activeSection === "settings" && state.activeTab === "ai") await loadAiMetadata(chatId);
+      paint(root);
+    });
+  });
+
+  root.querySelectorAll(".section-tab").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      state.activeSection = btn.dataset.section;
+      paint(root);
+      if (state.activeSection === "chat" && state.selectedId !== null) {
+        const chatId = state.selectedId;
+        await loadMessages(chatId);
+        if (String(state.selectedId) === String(chatId)) paint(root);
+      }
+      if (state.activeSection === "settings" && state.activeTab === "ai" && state.selectedId) {
+        const chatId = state.selectedId;
+        await loadAiMetadata(chatId);
+        if (state.activeSection === "settings" && String(state.selectedId) === String(chatId)) paint(root);
+      }
     });
   });
 
@@ -663,6 +855,83 @@ function bindEvents(root) {
         });
       }
     });
+  });
+
+  root.querySelector("[data-retry-settings]")?.addEventListener("click", async () => {
+    const chatId = state.selectedId;
+    if (chatId === null) return;
+    await loadChat(chatId).catch(() => {});
+    if (String(state.selectedId) === String(chatId) && state.activeSection === "settings") paint(root);
+  });
+
+  root.querySelector("[data-refresh-chat]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const chatId = state.selectedId;
+    await loadMessages(chatId);
+    if (String(state.selectedId) === String(chatId) && state.activeSection === "chat") paint(root);
+  });
+
+  const chatDraft = root.querySelector("#chat-draft");
+  chatDraft?.addEventListener("input", (event) => {
+    state.chatDraft = event.currentTarget.value;
+    const sendButton = root.querySelector(".chat-send");
+    if (sendButton) sendButton.disabled = state.chatSending || !state.chatDraft.trim();
+  });
+  chatDraft?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.form?.requestSubmit();
+    }
+  });
+
+  root.querySelector("#chat-composer")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = state.chatDraft.trim();
+    const chatId = state.selectedId;
+    if (!text || chatId === null || state.chatSending) return;
+
+    const chatKey = String(chatId);
+    state.sendingChatIds.add(chatKey);
+    state.chatSending = true;
+    state.chatDraft = "";
+    paint(root);
+    try {
+      const response = await api.sendMessage(chatId, { text });
+      const sentMessage = response?.message ?? response;
+      state.sendingChatIds.delete(chatKey);
+      state.chatSending = state.sendingChatIds.has(String(state.selectedId));
+      if (String(state.selectedId) !== String(chatId)) {
+        if (state.activeSection === "chat") paint(root);
+        return;
+      }
+      const normalized = {
+        ...sentMessage,
+        sender_name: sentMessage.sender_name || sentMessage.user_name || "Бот",
+        is_bot: true,
+        is_own_bot: true,
+        is_outgoing: true,
+      };
+      state.messages = [
+        ...state.messages.filter((message) => String(message.message_id) !== String(normalized.message_id)),
+        normalized,
+      ];
+      state.messagesChatId = String(chatId);
+      state.messagesError = "";
+      paint(root);
+      const history = root.querySelector("#chat-history");
+      if (history) history.scrollTop = history.scrollHeight;
+    } catch (error) {
+      state.sendingChatIds.delete(chatKey);
+      state.chatSending = state.sendingChatIds.has(String(state.selectedId));
+      if (String(state.selectedId) !== String(chatId)) {
+        if (state.activeSection === "chat") paint(root);
+        return;
+      }
+      state.chatDraft = text;
+      paint(root);
+      toast(error instanceof Error ? error.message : "Не удалось отправить сообщение.", "error");
+    }
   });
 
   const form = root.querySelector("#tab-content form");
