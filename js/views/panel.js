@@ -44,10 +44,12 @@ let state = {
 let aiProvidersPromise = null;
 const moderatorPromises = new Map();
 const avatarUrlCache = new Map();
+const messageMediaCache = new Map();
 let chatRefreshTimer = null;
 let messageOverlay = null;
 let longPressTimer = null;
 let avatarObserver = null;
+let messageMediaObserver = null;
 
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
@@ -87,6 +89,7 @@ async function loadChat(chatId) {
 }
 
 async function loadMessages(chatId) {
+  if (state.messagesChatId && state.messagesChatId !== String(chatId)) clearMessageMediaCache();
   state.messagesChatId = String(chatId);
   state.messages = [];
   state.messagesLoading = true;
@@ -288,6 +291,7 @@ function paint(root) {
 
   bindEvents(root);
   hydrateAvatars(root);
+  hydrateMessageMedia(root);
 }
 
 function chatItemHtml(chat) {
@@ -363,12 +367,93 @@ function hydrateAvatars(root) {
   });
 }
 
+function clearMessageMediaCache() {
+  for (const cached of messageMediaCache.values()) {
+    cached.promise.then((media) => {
+      if (media?.url) URL.revokeObjectURL(media.url);
+    }).catch(() => {});
+  }
+  messageMediaCache.clear();
+}
+
+function loadMessageMedia(container) {
+  if (!container || !container.isConnected || container.dataset.mediaRequested) return;
+  const path = container.dataset.mediaPath;
+  if (!path) return;
+  container.dataset.mediaRequested = "true";
+
+  let cached = messageMediaCache.get(path);
+  if (!cached) {
+    cached = { promise: api.fetchMessageMedia(path) };
+    messageMediaCache.set(path, cached);
+  }
+
+  cached.promise.then((media) => {
+    if (!container.isConnected) return;
+    if (!media?.url) {
+      container.innerHTML = `<span class="chat-media-unavailable">Медиа недоступно</span>`;
+      messageMediaCache.delete(path);
+      return;
+    }
+
+    if (media.contentType.startsWith("video/")) {
+      const video = document.createElement("video");
+      video.className = "chat-media-video";
+      video.autoplay = true;
+      video.loop = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.src = media.url;
+      video.setAttribute("aria-label", "Анимация из Telegram");
+      container.replaceChildren(video);
+      return;
+    }
+
+    if (media.contentType.startsWith("image/")) {
+      const image = document.createElement("img");
+      const kind = container.dataset.mediaKind;
+      image.className = kind === "sticker" ? "chat-media-sticker" : "chat-media-image";
+      image.alt = kind === "sticker" ? "Стикер из Telegram" : kind === "animation" ? "GIF из Telegram" : "Фото из Telegram";
+      image.src = media.url;
+      container.replaceChildren(image);
+      return;
+    }
+
+    container.innerHTML = `<span class="chat-media-unavailable">Формат медиа не поддерживается для предпросмотра</span>`;
+  }).catch(() => {
+    if (container.isConnected) {
+      container.innerHTML = `<span class="chat-media-unavailable">Не удалось загрузить медиа</span>`;
+    }
+    messageMediaCache.delete(path);
+  });
+}
+
+function hydrateMessageMedia(root) {
+  const containers = [...root.querySelectorAll("[data-media-path]")];
+  if (!containers.length) return;
+  if (!("IntersectionObserver" in window)) {
+    containers.forEach(loadMessageMedia);
+    return;
+  }
+  if (!messageMediaObserver) {
+    messageMediaObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        messageMediaObserver.unobserve(entry.target);
+        loadMessageMedia(entry.target);
+      });
+    }, { rootMargin: "220px" });
+  }
+  containers.forEach((container) => messageMediaObserver.observe(container));
+}
+
 function chatMessageHtml(message) {
   const name = message.sender_name || message.user_name || (message.username ? `@${message.username}` : "Участник");
   const username = String(message.username || "").replace(/^@/, "");
   const outgoing = Boolean(message.is_own_bot || message.is_outgoing);
   const text = message.text || message.caption || "";
-  const body = text || `Сообщение: ${String(message.type || "без текста").replaceAll("_", " ")}`;
+  const media = chatMessageMediaHtml(message);
+  const body = text ? `<p>${escapeHtml(text)}</p>` : media ? "" : `<p>Сообщение: ${escapeHtml(String(message.type || "без текста").replaceAll("_", " "))}</p>`;
   const initials = name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "?";
   const avatarPath = message.user_id
     ? `/api/chats/${encodeURIComponent(state.selectedId)}/members/${encodeURIComponent(message.user_id)}/avatar`
@@ -389,7 +474,8 @@ function chatMessageHtml(message) {
           ${username ? `<span class="chat-message-username">@${escapeHtml(username)}</span>` : ""}
         </div>
         ${repliedMessage ? `<div class="chat-reply-quote"><strong>${escapeHtml(repliedMessage.sender_name || repliedMessage.user_name || "Участник")}</strong><span>${escapeHtml(String(repliedMessage.text || repliedMessage.caption || "Медиа-сообщение").replace(/\s+/g, " ").slice(0, 90))}</span></div>` : ""}
-        <p>${escapeHtml(body)}</p>
+        ${media}
+        ${body}
         <div class="chat-message-footer">
           <button type="button" class="chat-reply-button" data-reply-message aria-label="Ответить на сообщение">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v2"/></svg>
@@ -400,6 +486,57 @@ function chatMessageHtml(message) {
       </div>
     </article>
   `;
+}
+
+function formatFileSize(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} Б`;
+  const units = ["КБ", "МБ", "ГБ"];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function chatMessageMediaHtml(message) {
+  const type = String(message.type || "").toLowerCase();
+  if (!message.has_media) return "";
+  const messageId = String(message.message_id ?? "");
+
+  if (type === "document") {
+    const filename = String(message.file_name || "Документ");
+    const extension = filename.includes(".") ? filename.split(".").pop().slice(0, 5).toUpperCase() : "FILE";
+    const size = formatFileSize(message.file_size);
+    return `
+      <div class="chat-document">
+        <span class="chat-document-icon" aria-hidden="true">${escapeHtml(extension || "FILE")}</span>
+        <span class="chat-document-info">
+          <strong title="${escapeHtml(filename)}">${escapeHtml(filename)}</strong>
+          <small>${size ? `Документ · ${escapeHtml(size)}` : "Документ"}</small>
+        </span>
+        <button type="button" class="chat-download-button" data-download-message="${escapeHtml(messageId)}" aria-label="Скачать ${escapeHtml(filename)}" title="Скачать документ">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 16v4h14v-4"/></svg>
+          <span>Скачать</span>
+        </button>
+      </div>
+    `;
+  }
+
+  if (!["photo", "sticker", "animation", "gif"].includes(type)) return "";
+  let mediaPath = `/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(messageId)}/media`;
+  if (type === "sticker" && (message.is_animated || message.is_video)) {
+    if (!message.has_thumbnail) {
+      return `<div class="chat-sticker-fallback" role="img" aria-label="Анимированный стикер">${escapeHtml(message.sticker_emoji || "Анимированный стикер")}</div>`;
+    }
+    mediaPath += "?thumbnail=1";
+  }
+  const kind = type === "gif" ? "animation" : type;
+  const label = kind === "photo" ? "Загрузка фото…" : kind === "sticker" ? "Загрузка стикера…" : "Загрузка GIF…";
+  return `<div class="chat-message-media ${kind === "sticker" ? "sticker" : ""}" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="${escapeHtml(kind)}" aria-label="${escapeHtml(label)}"><span class="chat-media-loading">${escapeHtml(label)}</span></div>`;
 }
 
 function replyPreviewHtml(message) {
@@ -1147,10 +1284,16 @@ function bindMessageGestures(root) {
       event.stopPropagation();
       startReply(root, message);
     });
+    article.querySelector("[data-download-message]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void downloadChatDocument(event.currentTarget, message);
+    });
     let startX = 0;
     let startY = 0;
 
     article.addEventListener("pointerdown", (event) => {
+      if (event.target.closest?.("button, a, video")) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
       startX = event.clientX;
       startY = event.clientY;
@@ -1173,10 +1316,33 @@ function bindMessageGestures(root) {
       });
     });
     article.addEventListener("contextmenu", (event) => {
+      if (event.target.closest?.("button, a, video")) return;
       event.preventDefault();
       showMessageActionMenu(root, message, event.clientX, event.clientY);
     });
   });
+}
+
+async function downloadChatDocument(button, message) {
+  if (button.disabled) return;
+  button.disabled = true;
+  try {
+    const result = await api.downloadMessageMedia(state.selectedId, message.message_id);
+    const url = URL.createObjectURL(result.blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = result.fileName || message.file_name || `document-${message.message_id}`;
+    link.hidden = true;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    toast("Загрузка документа началась");
+  } catch (error) {
+    toast(error instanceof Error ? error.message : "Не удалось скачать документ.", "error");
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function bindEvents(root) {

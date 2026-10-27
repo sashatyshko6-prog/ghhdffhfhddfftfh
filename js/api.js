@@ -79,6 +79,53 @@ async function fetchAvatar(path) {
   }
 }
 
+function filenameFromDisposition(value) {
+  if (!value) return "";
+  const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(value);
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1].trim().replace(/^"|"$/g, ""));
+    } catch {
+      // Fall through to the ASCII filename.
+    }
+  }
+  const plain = /filename\s*=\s*"([^"]*)"/i.exec(value);
+  return plain?.[1] || "";
+}
+
+async function fetchProtectedBlob(path) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (!res.ok) {
+    const text = await res.text();
+    let data = text || null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    throw new ApiError(res.status, data);
+  }
+
+  const blob = await res.blob();
+  return {
+    blob,
+    fileName: filenameFromDisposition(res.headers.get("Content-Disposition")),
+    contentType: res.headers.get("Content-Type") || blob.type || "",
+  };
+}
+
+async function fetchMessageMedia(path) {
+  const { blob, contentType } = await fetchProtectedBlob(path);
+  if (!blob.size) return null;
+  return { url: URL.createObjectURL(blob), contentType: contentType.split(";")[0].trim().toLowerCase() };
+}
+
 export const api = {
   // --- auth ---------------------------------------------------------------
   healthz: () => request("GET", "/api/healthz"),
@@ -95,6 +142,9 @@ export const api = {
   listMessages: (chatId) => request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages`),
   sendMessage: (chatId, body) => request("POST", `/api/chats/${encodeURIComponent(chatId)}/send`, body),
   fetchAvatar,
+  fetchMessageMedia,
+  downloadMessageMedia: (chatId, messageId) =>
+    fetchProtectedBlob(`/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/media`),
   getChatAvatar: (chatId) => fetchAvatar(`/api/chats/${encodeURIComponent(chatId)}/avatar`),
   getMemberAvatar: (chatId, userId) =>
     fetchAvatar(`/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/avatar`),
