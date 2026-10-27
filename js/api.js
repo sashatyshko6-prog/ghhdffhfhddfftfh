@@ -139,7 +139,8 @@ export const api = {
   getChat: (chatId) => request("GET", `/api/chats/${chatId}`),
   listModerators: (chatId) => request("GET", `/api/chats/${chatId}/moderators`),
   getSettings: (chatId) => request("GET", `/api/chats/${chatId}/settings`),
-  listMessages: (chatId) => request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages`),
+  listMessages: (chatId, limit = 200) =>
+    request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages?limit=${encodeURIComponent(limit)}`),
   sendMessage: (chatId, body) => request("POST", `/api/chats/${encodeURIComponent(chatId)}/send`, body),
   fetchAvatar,
   fetchMessageMedia,

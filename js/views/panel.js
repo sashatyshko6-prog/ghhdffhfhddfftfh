@@ -31,6 +31,7 @@ let state = {
   activeTab: "antiraid",
   messages: [],
   messagesChatId: null,
+  messagesLimit: 200,
   messagesLoading: false,
   messagesError: "",
   chatDraft: "",
@@ -50,6 +51,7 @@ let messageOverlay = null;
 let longPressTimer = null;
 let avatarObserver = null;
 let messageMediaObserver = null;
+let enteringMessageIds = new Set();
 
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
@@ -95,7 +97,7 @@ async function loadMessages(chatId) {
   state.messagesLoading = true;
   state.messagesError = "";
   try {
-    const response = await api.listMessages(chatId);
+    const response = await api.listMessages(chatId, state.messagesLimit);
     const messages = Array.isArray(response) ? response : response?.messages;
     if (!Array.isArray(messages)) throw new Error("Сервер вернул историю сообщений в неизвестном формате.");
     if (String(state.selectedId) !== String(chatId)) return;
@@ -110,7 +112,7 @@ async function loadMessages(chatId) {
 
 async function refreshMessages(root, chatId) {
   try {
-    const response = await api.listMessages(chatId);
+    const response = await api.listMessages(chatId, state.messagesLimit);
     const messages = Array.isArray(response) ? response : response?.messages;
     if (!Array.isArray(messages) || String(state.selectedId) !== String(chatId)) return;
     const currentIds = state.messages.map((message) => String(message.message_id)).join(",");
@@ -124,11 +126,28 @@ async function refreshMessages(root, chatId) {
     const history = root.querySelector("#chat-history");
     const wasAtBottom = history && history.scrollHeight - history.clientHeight - history.scrollTop < 40;
     const previousScrollTop = history?.scrollTop ?? 0;
+    const existingIds = new Set(state.messages.map((message) => String(message.message_id)));
+    const lastKnownId = state.messages.reduce((latest, message) => {
+      const id = Number(message.message_id);
+      return Number.isFinite(id) ? Math.max(latest, id) : latest;
+    }, 0);
+    enteringMessageIds = new Set(
+      messages
+        .filter((message) => !existingIds.has(String(message.message_id)) && Number(message.message_id) > lastKnownId)
+        .slice(-4)
+        .map((message) => String(message.message_id)),
+    );
     state.messages = messages;
     if (state.activeSection === "chat" && String(state.selectedId) === String(chatId)) {
       paint(root);
+      enteringMessageIds.clear();
       const updatedHistory = root.querySelector("#chat-history");
-      if (updatedHistory) updatedHistory.scrollTop = wasAtBottom ? updatedHistory.scrollHeight : previousScrollTop;
+      if (updatedHistory) {
+        updatedHistory.scrollTop = wasAtBottom ? updatedHistory.scrollHeight : previousScrollTop;
+        updateJumpToBottomButton(root);
+      }
+    } else {
+      enteringMessageIds.clear();
     }
   } catch {
     // Keep the last good history; the visible refresh button can report a manual retry.
@@ -168,6 +187,7 @@ export async function renderPanel(root) {
   state.settingsError = "";
   state.messages = [];
   state.messagesChatId = null;
+  state.messagesLimit = 200;
   state.messagesError = "";
   state.chatDraft = "";
   state.replyToMessage = null;
@@ -322,9 +342,21 @@ function chatTime(value) {
   return date.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
-function scrollChatToBottom(root) {
+function scrollChatToBottom(root, behavior = "auto") {
   const history = root.querySelector("#chat-history");
-  if (history) history.scrollTop = history.scrollHeight;
+  if (history) {
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    history.scrollTo({ top: history.scrollHeight, behavior: reducedMotion ? "auto" : behavior });
+    window.requestAnimationFrame(() => updateJumpToBottomButton(root));
+  }
+}
+
+function updateJumpToBottomButton(root) {
+  const history = root.querySelector("#chat-history");
+  const button = root.querySelector("[data-jump-bottom]");
+  if (!history || !button) return;
+  const distanceFromBottom = history.scrollHeight - history.clientHeight - history.scrollTop;
+  button.hidden = history.scrollHeight <= history.clientHeight + 40 || distanceFromBottom <= 100;
 }
 
 function loadAvatarImage(image) {
@@ -461,9 +493,18 @@ function chatMessageHtml(message) {
   const repliedMessage = message.reply_to
     ? state.messages.find((item) => String(item.message_id) === String(message.reply_to))
     : null;
+  const replyQuoteText = repliedMessage
+    ? repliedMessage.text || repliedMessage.caption || "Медиа-сообщение"
+    : `Сообщение #${message.reply_to}`;
+  const replyQuote = message.reply_to
+    ? `<button type="button" class="chat-reply-quote" data-reply-target="${escapeHtml(String(message.reply_to))}" aria-label="Перейти к сообщению, на которое ответили">
+        <strong>${escapeHtml(repliedMessage?.sender_name || repliedMessage?.user_name || "Ответ на сообщение")}</strong>
+        <span>${escapeHtml(String(replyQuoteText).replace(/\s+/g, " ").slice(0, 90))}</span>
+      </button>`
+    : "";
 
   return `
-    <article class="chat-message ${outgoing ? "outgoing" : ""}" data-message-id="${escapeHtml(String(message.message_id ?? ""))}">
+    <article class="chat-message ${outgoing ? "outgoing" : ""} ${enteringMessageIds.has(String(message.message_id)) ? "chat-message-enter" : ""}" data-message-id="${escapeHtml(String(message.message_id ?? ""))}">
       <div class="chat-message-avatar" aria-hidden="true">
         <span class="avatar-initials">${escapeHtml(initials)}</span>
         ${avatarPath ? `<img class="avatar-photo" data-avatar-path="${escapeHtml(avatarPath)}" alt="" loading="lazy" hidden />` : ""}
@@ -473,7 +514,7 @@ function chatMessageHtml(message) {
           <strong class="chat-message-name">${escapeHtml(name)}</strong>
           ${username ? `<span class="chat-message-username">@${escapeHtml(username)}</span>` : ""}
         </div>
-        ${repliedMessage ? `<div class="chat-reply-quote"><strong>${escapeHtml(repliedMessage.sender_name || repliedMessage.user_name || "Участник")}</strong><span>${escapeHtml(String(repliedMessage.text || repliedMessage.caption || "Медиа-сообщение").replace(/\s+/g, " ").slice(0, 90))}</span></div>` : ""}
+        ${replyQuote}
         ${media}
         ${body}
         <div class="chat-message-footer">
@@ -570,6 +611,9 @@ function chatTabHtml() {
   return `
     <section class="group-chat" aria-label="Переписка группы">
       <div class="chat-history" id="chat-history" aria-live="polite">${content}</div>
+      <button type="button" class="chat-jump-bottom" data-jump-bottom aria-label="Перейти к последним сообщениям" title="Последние сообщения" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15m0 0 6-6m-6 6-6-6"/></svg>
+      </button>
       <form class="chat-composer" id="chat-composer">
         ${replyPreviewHtml(state.replyToMessage)}
         <div class="chat-composer-row">
@@ -1289,6 +1333,11 @@ function bindMessageGestures(root) {
       event.stopPropagation();
       void downloadChatDocument(event.currentTarget, message);
     });
+    article.querySelector("[data-reply-target]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void jumpToReplyTarget(root, event.currentTarget.dataset.replyTarget, event.currentTarget);
+    });
     let startX = 0;
     let startY = 0;
 
@@ -1345,8 +1394,56 @@ async function downloadChatDocument(button, message) {
   }
 }
 
+function highlightChatMessage(root, messageId) {
+  const target = [...root.querySelectorAll(".chat-message[data-message-id]")]
+    .find((article) => article.dataset.messageId === String(messageId));
+  if (!target) return false;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  target.scrollIntoView({ behavior: reducedMotion ? "auto" : "smooth", block: "center" });
+  target.classList.remove("chat-message-target");
+  void target.offsetWidth;
+  target.classList.add("chat-message-target");
+  window.setTimeout(() => target.classList.remove("chat-message-target"), 1500);
+  return true;
+}
+
+async function jumpToReplyTarget(root, messageId, trigger) {
+  if (highlightChatMessage(root, messageId)) return;
+  const chatId = state.selectedId;
+  if (chatId === null) return;
+
+  trigger.disabled = true;
+  try {
+    const response = await api.listMessages(chatId, 500);
+    const messages = Array.isArray(response) ? response : response?.messages;
+    if (!Array.isArray(messages) || String(state.selectedId) !== String(chatId)) return;
+    if (!messages.some((message) => String(message.message_id) === String(messageId))) {
+      toast("Исходное сообщение не найдено в сохранённой истории.", "error");
+      return;
+    }
+    state.messagesLimit = 500;
+    state.messages = messages;
+    state.messagesChatId = String(chatId);
+    paint(root);
+    window.requestAnimationFrame(() => {
+      if (!highlightChatMessage(root, messageId)) {
+        toast("Не удалось перейти к исходному сообщению.", "error");
+      }
+    });
+  } catch (error) {
+    toast(error instanceof Error ? error.message : "Не удалось найти исходное сообщение.", "error");
+  } finally {
+    if (trigger.isConnected) trigger.disabled = false;
+  }
+}
+
 function bindEvents(root) {
   bindMessageGestures(root);
+
+  const chatHistory = root.querySelector("#chat-history");
+  chatHistory?.addEventListener("scroll", () => updateJumpToBottomButton(root), { passive: true });
+  root.querySelector("[data-jump-bottom]")?.addEventListener("click", () => scrollChatToBottom(root, "smooth"));
+  updateJumpToBottomButton(root);
 
   root.querySelector("#logout-btn")?.addEventListener("click", () => {
     if (chatRefreshTimer) {
@@ -1370,12 +1467,14 @@ function bindEvents(root) {
   root.querySelectorAll(".chat-item").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const chatId = btn.dataset.chatId;
+      if (state.messagesChatId && state.messagesChatId !== String(chatId)) clearMessageMediaCache();
       state.selectedId = chatId;
       state.activeSection = "chat";
       state.settings = null;
       state.settingsError = "";
       state.messages = [];
       state.messagesChatId = String(chatId);
+      state.messagesLimit = 200;
       state.messagesLoading = true;
       state.messagesError = "";
       state.chatDraft = "";
@@ -1494,7 +1593,9 @@ function bindEvents(root) {
       state.messagesChatId = String(chatId);
       state.messagesError = "";
       if (state.replyToMessage === replyMessage) state.replyToMessage = null;
+      enteringMessageIds = new Set([String(normalized.message_id)]);
       paint(root);
+      enteringMessageIds.clear();
       scrollChatToBottom(root);
     } catch (error) {
       state.sendingChatIds.delete(chatKey);
