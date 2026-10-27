@@ -65,6 +65,20 @@ async function request(method, path, body) {
   return data;
 }
 
+async function fetchAvatar(path) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { headers });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return blob.size ? URL.createObjectURL(blob) : null;
+  } catch {
+    return null;
+  }
+}
+
 export const api = {
   // --- auth ---------------------------------------------------------------
   healthz: () => request("GET", "/api/healthz"),
@@ -80,6 +94,22 @@ export const api = {
   getSettings: (chatId) => request("GET", `/api/chats/${chatId}/settings`),
   listMessages: (chatId) => request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages`),
   sendMessage: (chatId, body) => request("POST", `/api/chats/${encodeURIComponent(chatId)}/send`, body),
+  fetchAvatar,
+  getChatAvatar: (chatId) => fetchAvatar(`/api/chats/${encodeURIComponent(chatId)}/avatar`),
+  getMemberAvatar: (chatId, userId) =>
+    fetchAvatar(`/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/avatar`),
+  deleteMessage: (chatId, messageId) =>
+    request("DELETE", `/api/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`),
+  getMemberModeration: (chatId, userId) =>
+    request("GET", `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/moderation`),
+  banMember: (chatId, userId) =>
+    request("POST", `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/ban`, {}),
+  unbanMember: (chatId, userId) =>
+    request("POST", `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/unban`, {}),
+  muteMember: (chatId, userId, durationSeconds) =>
+    request("POST", `/api/chats/${encodeURIComponent(chatId)}/members/${encodeURIComponent(userId)}/mute`, {
+      duration_seconds: durationSeconds,
+    }),
 
   patchAntispam: (chatId, body) => request("PATCH", `/api/chats/${chatId}/settings/antispam`, body),
   patchAntinsfw: (chatId, body) => request("PATCH", `/api/chats/${chatId}/settings/antinsfw`, body),

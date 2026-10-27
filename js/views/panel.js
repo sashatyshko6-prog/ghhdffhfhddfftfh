@@ -34,6 +34,7 @@ let state = {
   messagesLoading: false,
   messagesError: "",
   chatDraft: "",
+  replyToMessage: null,
   chatSending: false,
   sendingChatIds: new Set(),
   loading: true,
@@ -42,7 +43,11 @@ let state = {
 
 let aiProvidersPromise = null;
 const moderatorPromises = new Map();
+const avatarUrlCache = new Map();
 let chatRefreshTimer = null;
+let messageOverlay = null;
+let longPressTimer = null;
+let avatarObserver = null;
 
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
@@ -162,6 +167,7 @@ export async function renderPanel(root) {
   state.messagesChatId = null;
   state.messagesError = "";
   state.chatDraft = "";
+  state.replyToMessage = null;
   state.chatSending = false;
   state.sendingChatIds = new Set();
   state.activeSection = "chat";
@@ -202,6 +208,8 @@ export async function renderPanel(root) {
 }
 
 function paint(root) {
+  closeMessageOverlay();
+  avatarObserver?.disconnect();
   const user = getCurrentUser();
   const selectedChat = state.chats.find((chat) => String(chat.id) === String(state.selectedId));
   const pageTitle = state.activeSection === "chat"
@@ -239,7 +247,12 @@ function paint(root) {
           <button class="icon-btn mobile-only" id="menu-btn" type="button" aria-label="Открыть список чатов" title="Открыть список чатов">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
-          ${state.activeSection === "chat" ? `<div class="chat-header-avatar" aria-hidden="true">${escapeHtml((selectedChat?.title || "Ч").trim().slice(0, 1).toUpperCase())}</div>` : ""}
+          ${state.activeSection === "chat" ? `
+            <div class="chat-header-avatar" aria-hidden="true">
+              <span class="avatar-initials">${escapeHtml((selectedChat?.title || "Ч").trim().slice(0, 1).toUpperCase())}</span>
+              ${selectedChat ? `<img class="avatar-photo" data-avatar-path="/api/chats/${encodeURIComponent(selectedChat.id)}/avatar" alt="" loading="lazy" hidden />` : ""}
+            </div>
+          ` : ""}
           <h1 class="page-title">${escapeHtml(pageTitle)}</h1>
           ${state.activeSection === "chat" ? `
             <button class="icon-btn chat-refresh" type="button" data-refresh-chat aria-label="Обновить сообщения" title="Обновить сообщения">
@@ -274,6 +287,7 @@ function paint(root) {
   `;
 
   bindEvents(root);
+  hydrateAvatars(root);
 }
 
 function chatItemHtml(chat) {
@@ -281,7 +295,10 @@ function chatItemHtml(chat) {
   const active = String(chat.id) === String(state.selectedId);
   return `
     <button class="chat-item ${active ? "active" : ""}" data-chat-id="${chat.id}">
-      <div class="chat-avatar ${active ? "chat-avatar-active" : ""}">${escapeHtml(initials)}</div>
+      <div class="chat-avatar ${active ? "chat-avatar-active" : ""}">
+        <span class="avatar-initials">${escapeHtml(initials)}</span>
+        <img class="avatar-photo" data-avatar-path="/api/chats/${encodeURIComponent(chat.id)}/avatar" alt="" loading="lazy" hidden />
+      </div>
       <div class="chat-meta">
         <div class="chat-title">${escapeHtml(chat.title)}</div>
         <div class="chat-sub">${escapeHtml(chat.type || "chat")}${chat.privacyAccepted === false ? " · приватность не принята" : ""}</div>
@@ -306,6 +323,46 @@ function scrollChatToBottom(root) {
   if (history) history.scrollTop = history.scrollHeight;
 }
 
+function loadAvatarImage(image) {
+  if (!image || !image.isConnected) return;
+  const path = image.dataset.avatarPath;
+  if (!path || image.dataset.avatarRequested) return;
+  image.dataset.avatarRequested = "true";
+  const cached = avatarUrlCache.get(path);
+  const avatarPromise = cached?.expiresAt > Date.now()
+    ? cached.promise
+    : api.fetchAvatar(path);
+  avatarUrlCache.set(path, { expiresAt: Date.now() + 300_000, promise: avatarPromise });
+  if (avatarUrlCache.size > 300) avatarUrlCache.delete(avatarUrlCache.keys().next().value);
+  avatarPromise.then((url) => {
+    if (!url || !image.isConnected) return;
+    image.src = url;
+    image.hidden = false;
+    image.closest(".chat-avatar, .chat-header-avatar, .chat-message-avatar")?.classList.add("has-photo");
+  });
+}
+
+function hydrateAvatars(root) {
+  const images = [...root.querySelectorAll("img[data-avatar-path]")];
+  if (!("IntersectionObserver" in window)) {
+    images.forEach(loadAvatarImage);
+    return;
+  }
+  if (!avatarObserver) {
+    avatarObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        avatarObserver.unobserve(entry.target);
+        loadAvatarImage(entry.target.querySelector("img[data-avatar-path]"));
+      });
+    }, { rootMargin: "180px" });
+  }
+  images.forEach((image) => {
+    const container = image.closest(".chat-avatar, .chat-header-avatar, .chat-message-avatar") || image;
+    avatarObserver.observe(container);
+  });
+}
+
 function chatMessageHtml(message) {
   const name = message.sender_name || message.user_name || (message.username ? `@${message.username}` : "Участник");
   const username = String(message.username || "").replace(/^@/, "");
@@ -313,19 +370,53 @@ function chatMessageHtml(message) {
   const text = message.text || message.caption || "";
   const body = text || `Сообщение: ${String(message.type || "без текста").replaceAll("_", " ")}`;
   const initials = name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "?";
+  const avatarPath = message.user_id
+    ? `/api/chats/${encodeURIComponent(state.selectedId)}/members/${encodeURIComponent(message.user_id)}/avatar`
+    : "";
+  const repliedMessage = message.reply_to
+    ? state.messages.find((item) => String(item.message_id) === String(message.reply_to))
+    : null;
 
   return `
-    <article class="chat-message ${outgoing ? "outgoing" : ""}">
-      <div class="chat-message-avatar" aria-hidden="true">${escapeHtml(initials)}</div>
+    <article class="chat-message ${outgoing ? "outgoing" : ""}" data-message-id="${escapeHtml(String(message.message_id ?? ""))}">
+      <div class="chat-message-avatar" aria-hidden="true">
+        <span class="avatar-initials">${escapeHtml(initials)}</span>
+        ${avatarPath ? `<img class="avatar-photo" data-avatar-path="${escapeHtml(avatarPath)}" alt="" loading="lazy" hidden />` : ""}
+      </div>
       <div class="chat-message-bubble">
         <div class="chat-message-heading">
           <strong class="chat-message-name">${escapeHtml(name)}</strong>
           ${username ? `<span class="chat-message-username">@${escapeHtml(username)}</span>` : ""}
         </div>
+        ${repliedMessage ? `<div class="chat-reply-quote"><strong>${escapeHtml(repliedMessage.sender_name || repliedMessage.user_name || "Участник")}</strong><span>${escapeHtml(String(repliedMessage.text || repliedMessage.caption || "Медиа-сообщение").replace(/\s+/g, " ").slice(0, 90))}</span></div>` : ""}
         <p>${escapeHtml(body)}</p>
-        <time>${chatTime(message.date)}</time>
+        <div class="chat-message-footer">
+          <button type="button" class="chat-reply-button" data-reply-message aria-label="Ответить на сообщение">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h9a7 7 0 0 1 7 7v2"/></svg>
+            <span>Ответить</span>
+          </button>
+          <time>${chatTime(message.date)}</time>
+        </div>
       </div>
     </article>
+  `;
+}
+
+function replyPreviewHtml(message) {
+  if (!message) return "";
+  const author = message.sender_name || message.user_name || "Участник";
+  const text = String(message.text || message.caption || "Медиа-сообщение").replace(/\s+/g, " ").slice(0, 120);
+  return `
+    <div class="reply-preview">
+      <div class="reply-preview-mark" aria-hidden="true"></div>
+      <div class="reply-preview-copy">
+        <strong>Ответ: ${escapeHtml(author)}</strong>
+        <span>${escapeHtml(text)}</span>
+      </div>
+      <button type="button" class="reply-preview-close" data-clear-reply aria-label="Отменить ответ" title="Отменить ответ">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
   `;
 }
 
@@ -343,10 +434,13 @@ function chatTabHtml() {
     <section class="group-chat" aria-label="Переписка группы">
       <div class="chat-history" id="chat-history" aria-live="polite">${content}</div>
       <form class="chat-composer" id="chat-composer">
-        <textarea id="chat-draft" rows="1" maxlength="4096" ${state.chatSending ? "disabled" : ""} placeholder="Сообщение в группу…" aria-label="Сообщение группе">${escapeHtml(state.chatDraft)}</textarea>
-        <button type="submit" class="chat-send" aria-label="Отправить сообщение" title="Отправить сообщение" ${state.chatSending || !state.chatDraft.trim() ? "disabled" : ""}>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 3-7.2 18-3.7-7.1L3 10.2 21 3Z"/><path d="M10.1 13.9 21 3"/></svg>
-        </button>
+        ${replyPreviewHtml(state.replyToMessage)}
+        <div class="chat-composer-row">
+          <textarea id="chat-draft" rows="1" maxlength="4096" ${state.chatSending ? "disabled" : ""} placeholder="Сообщение в группу…" aria-label="Сообщение группе">${escapeHtml(state.chatDraft)}</textarea>
+          <button type="submit" class="chat-send" aria-label="Отправить сообщение" title="Отправить сообщение" ${state.chatSending || !state.chatDraft.trim() ? "disabled" : ""}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 3-7.2 18-3.7-7.1L3 10.2 21 3Z"/><path d="M10.1 13.9 21 3"/></svg>
+          </button>
+        </div>
       </form>
     </section>
   `;
@@ -639,7 +733,10 @@ function moderatorsHtml() {
           .map(
             (m) => `
           <div class="mod-item">
-            <div class="chat-avatar">${(m.name || "?").slice(0, 2).toUpperCase()}</div>
+            <div class="chat-avatar">
+              <span class="avatar-initials">${escapeHtml((m.name || "?").slice(0, 2).toUpperCase())}</span>
+              <img class="avatar-photo" data-avatar-path="/api/chats/${encodeURIComponent(state.selectedId)}/members/${encodeURIComponent(m.id)}/avatar" alt="" loading="lazy" hidden />
+            </div>
             <div>
               <div class="mod-name">${escapeHtml(m.name)}</div>
               <div class="hint">${m.status}</div>
@@ -794,7 +891,297 @@ function attachAutosave(form) {
   });
 }
 
+function closeMessageOverlay() {
+  if (longPressTimer) {
+    window.clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+  if (messageOverlay?.escapeHandler) {
+    document.removeEventListener("keydown", messageOverlay.escapeHandler);
+  }
+  messageOverlay?.remove();
+  messageOverlay = null;
+}
+
+function setMessageOverlay(overlay) {
+  closeMessageOverlay();
+  messageOverlay = overlay;
+  overlay.escapeHandler = (event) => {
+    if (event.key === "Escape") closeMessageOverlay();
+  };
+  document.addEventListener("keydown", overlay.escapeHandler);
+  document.body.appendChild(overlay);
+}
+
+function showMessageActionMenu(root, message, x, y) {
+  closeMessageOverlay();
+  const hasUser = Boolean(message.user_id && !message.is_bot && !message.is_own_bot);
+  const canCopy = Boolean(message.text || message.caption);
+  const overlay = document.createElement("div");
+  overlay.className = "message-action-backdrop";
+  overlay.innerHTML = `
+    <div class="message-action-menu" role="menu" aria-label="Действия с сообщением">
+      <button type="button" role="menuitem" data-message-action="delete" ${message.message_id ? "" : "disabled"}>Удалить сообщение</button>
+      <button type="button" role="menuitem" data-message-action="copy" ${canCopy ? "" : "disabled"}>Скопировать</button>
+      ${hasUser ? `
+        <div class="message-menu-divider"></div>
+        <button type="button" role="menuitem" data-message-action="ban" data-banned="false" disabled>Проверка статуса…</button>
+        <button type="button" role="menuitem" data-message-action="mute" disabled>Мут</button>
+      ` : ""}
+      <div class="message-menu-divider"></div>
+      <button type="button" role="menuitem" data-message-action="reply" ${message.message_id ? "" : "disabled"}>Ответить</button>
+    </div>
+  `;
+  setMessageOverlay(overlay);
+
+  const menu = overlay.querySelector(".message-action-menu");
+  const bounds = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(Number(x) || 8, window.innerWidth - bounds.width - 8));
+  const top = Math.max(8, Math.min(Number(y) || 8, window.innerHeight - bounds.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) {
+      closeMessageOverlay();
+      return;
+    }
+    const button = event.target.closest?.("[data-message-action]");
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void performMessageAction(root, message, button);
+  });
+
+  if (hasUser) {
+    const banButton = menu.querySelector('[data-message-action="ban"]');
+    const muteButton = menu.querySelector('[data-message-action="mute"]');
+    api.getMemberModeration(state.selectedId, message.user_id).then((status) => {
+      if (messageOverlay !== overlay) return;
+      if (!status.can_moderate) {
+        banButton.hidden = true;
+        muteButton.hidden = true;
+        return;
+      }
+      banButton.dataset.banned = String(Boolean(status.is_banned));
+      banButton.textContent = status.is_banned ? "Разбанить" : "Забанить";
+      banButton.disabled = false;
+      muteButton.hidden = !status.can_mute;
+      muteButton.disabled = false;
+    }).catch(() => {
+      if (messageOverlay !== overlay) return;
+      banButton.textContent = "Статус недоступен";
+      banButton.disabled = true;
+      muteButton.disabled = true;
+    });
+  }
+}
+
+async function copyMessageText(message) {
+  const text = String(message.text || message.caption || "");
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const copyField = document.createElement("textarea");
+      copyField.value = text;
+      copyField.style.position = "fixed";
+      copyField.style.opacity = "0";
+      document.body.appendChild(copyField);
+      copyField.select();
+      const copied = document.execCommand("copy");
+      copyField.remove();
+      if (!copied) throw new Error("copy_failed");
+    }
+    toast("Текст скопирован");
+  } catch {
+    toast("Не удалось скопировать текст.", "error");
+  }
+}
+
+function startReply(root, message) {
+  state.replyToMessage = message;
+  closeMessageOverlay();
+  paint(root);
+  root.querySelector("#chat-draft")?.focus();
+}
+
+async function performMessageAction(root, message, button) {
+  const action = button.dataset.messageAction;
+  const chatId = state.selectedId;
+  const userId = message.user_id;
+  if (chatId === null) return closeMessageOverlay();
+
+  if (action === "reply") {
+    startReply(root, message);
+    return;
+  }
+  if (action === "copy") {
+    closeMessageOverlay();
+    await copyMessageText(message);
+    return;
+  }
+  if (action === "delete") {
+    closeMessageOverlay();
+    if (!window.confirm("Удалить это сообщение из группы?")) return;
+    try {
+      await api.deleteMessage(chatId, message.message_id);
+      state.messages = state.messages.filter(
+        (item) => String(item.message_id) !== String(message.message_id),
+      );
+      paint(root);
+      toast("Сообщение удалено");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось удалить сообщение.", "error");
+    }
+    return;
+  }
+  if (action === "ban") {
+    const isBanned = button.dataset.banned === "true";
+    closeMessageOverlay();
+    if (!isBanned && !window.confirm("Забанить этого участника в группе?")) return;
+    if (isBanned && !window.confirm("Разбанить этого участника?")) return;
+    try {
+      if (isBanned) await api.unbanMember(chatId, userId);
+      else await api.banMember(chatId, userId);
+      toast(isBanned ? "Пользователь разбанен" : "Пользователь забанен");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось изменить бан.", "error");
+    }
+    return;
+  }
+  if (action === "mute") {
+    closeMessageOverlay();
+    showMuteDialog(root, message);
+  }
+}
+
+function showMuteDialog(root, message) {
+  const overlay = document.createElement("div");
+  overlay.className = "message-action-backdrop modal-backdrop";
+  overlay.innerHTML = `
+    <section class="message-action-dialog" role="dialog" aria-modal="true" aria-labelledby="mute-dialog-title">
+      <h2 id="mute-dialog-title">Срок мута</h2>
+      <div class="mute-duration-grid">
+        <button type="button" data-duration="60" data-duration-label="1 мин">1 мин</button>
+        <button type="button" data-duration="300" data-duration-label="5 мин">5 мин</button>
+        <button type="button" data-duration="1800" data-duration-label="30 мин">30 мин</button>
+        <button type="button" data-duration="3600" data-duration-label="1 час">1 час</button>
+        <button type="button" data-duration="7200" data-duration-label="2 часа">2 часа</button>
+        <button type="button" data-duration="18000" data-duration-label="5 часов">5 часов</button>
+        <button type="button" data-duration="86400" data-duration-label="24 часа">24 часа</button>
+        <button type="button" data-duration="31536000" data-duration-label="1 год">1 год</button>
+      </div>
+      <button type="button" class="mute-custom-toggle" data-custom-toggle>Выбрать срок</button>
+      <form class="mute-custom-form" data-custom-form hidden>
+        <label class="mute-custom-field">
+          <span>Срок</span>
+          <input type="number" min="1" step="1" value="1" data-custom-value required />
+        </label>
+        <select aria-label="Единица срока" data-custom-unit>
+          <option value="3600">Час</option>
+          <option value="60" selected>мин</option>
+        </select>
+        <button type="submit" class="mute-confirm" data-custom-confirm>Подтвердить</button>
+      </form>
+      <button type="button" class="mute-cancel" data-close-dialog>Отмена</button>
+    </section>
+  `;
+  setMessageOverlay(overlay);
+  overlay.querySelector(".message-action-dialog").addEventListener("click", (event) => event.stopPropagation());
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeMessageOverlay();
+  });
+  overlay.querySelector("[data-close-dialog]").addEventListener("click", closeMessageOverlay);
+  overlay.querySelectorAll("[data-duration]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void applyMuteDuration(
+        root,
+        message,
+        Number(button.dataset.duration),
+        button.dataset.durationLabel,
+        button,
+      );
+    });
+  });
+  overlay.querySelector("[data-custom-toggle]").addEventListener("click", () => {
+    const form = overlay.querySelector("[data-custom-form]");
+    form.hidden = false;
+    overlay.querySelector("[data-custom-value]").focus();
+  });
+  overlay.querySelector("[data-custom-form]").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const amount = Number(overlay.querySelector("[data-custom-value]").value);
+    const unitSeconds = Number(overlay.querySelector("[data-custom-unit]").value);
+    const durationSeconds = amount * unitSeconds;
+    if (!Number.isInteger(amount) || amount < 1 || durationSeconds > 31_536_000) {
+      toast("Срок должен быть не меньше 1 и не больше 1 года.", "error");
+      return;
+    }
+    const unitLabel = unitSeconds === 3600 ? "ч." : "мин.";
+    void applyMuteDuration(root, message, durationSeconds, `${amount} ${unitLabel}`, event.submitter);
+  });
+}
+
+async function applyMuteDuration(root, message, durationSeconds, label, trigger) {
+  if (trigger) trigger.disabled = true;
+  try {
+    await api.muteMember(state.selectedId, message.user_id, durationSeconds);
+    closeMessageOverlay();
+    toast(`Мут установлен на ${label}`);
+  } catch (error) {
+    if (trigger) trigger.disabled = false;
+    toast(error instanceof Error ? error.message : "Не удалось замутить пользователя.", "error");
+  }
+}
+
+function bindMessageGestures(root) {
+  root.querySelectorAll(".chat-message").forEach((article) => {
+    const message = state.messages.find(
+      (item) => String(item.message_id) === String(article.dataset.messageId),
+    );
+    if (!message) return;
+    article.querySelector("[data-reply-message]")?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startReply(root, message);
+    });
+    let startX = 0;
+    let startY = 0;
+
+    article.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      startX = event.clientX;
+      startY = event.clientY;
+      if (longPressTimer) window.clearTimeout(longPressTimer);
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        showMessageActionMenu(root, message, startX, startY);
+      }, 500);
+    });
+    article.addEventListener("pointermove", (event) => {
+      if (Math.abs(event.clientX - startX) > 10 || Math.abs(event.clientY - startY) > 10) {
+        if (longPressTimer) window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      }
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+      article.addEventListener(eventName, () => {
+        if (longPressTimer) window.clearTimeout(longPressTimer);
+        longPressTimer = null;
+      });
+    });
+    article.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      showMessageActionMenu(root, message, event.clientX, event.clientY);
+    });
+  });
+}
+
 function bindEvents(root) {
+  bindMessageGestures(root);
+
   root.querySelector("#logout-btn")?.addEventListener("click", () => {
     if (chatRefreshTimer) {
       window.clearInterval(chatRefreshTimer);
@@ -826,6 +1213,7 @@ function bindEvents(root) {
       state.messagesLoading = true;
       state.messagesError = "";
       state.chatDraft = "";
+      state.replyToMessage = null;
       state.chatSending = state.sendingChatIds.has(String(chatId));
       paint(root);
       await Promise.allSettled([loadChat(chatId), loadMessages(chatId)]);
@@ -885,6 +1273,11 @@ function bindEvents(root) {
   });
 
   const chatDraft = root.querySelector("#chat-draft");
+  root.querySelector("[data-clear-reply]")?.addEventListener("click", () => {
+    state.replyToMessage = null;
+    paint(root);
+    root.querySelector("#chat-draft")?.focus();
+  });
   chatDraft?.addEventListener("input", (event) => {
     state.chatDraft = event.currentTarget.value;
     const sendButton = root.querySelector(".chat-send");
@@ -901,6 +1294,7 @@ function bindEvents(root) {
     event.preventDefault();
     const text = state.chatDraft.trim();
     const chatId = state.selectedId;
+    const replyMessage = state.replyToMessage;
     if (!text || chatId === null || state.chatSending) return;
 
     const chatKey = String(chatId);
@@ -909,7 +1303,10 @@ function bindEvents(root) {
     state.chatDraft = "";
     paint(root);
     try {
-      const response = await api.sendMessage(chatId, { text });
+      const response = await api.sendMessage(chatId, {
+        text,
+        ...(replyMessage?.message_id ? { reply_to_message_id: replyMessage.message_id } : {}),
+      });
       const sentMessage = response?.message ?? response;
       state.sendingChatIds.delete(chatKey);
       state.chatSending = state.sendingChatIds.has(String(state.selectedId));
@@ -930,6 +1327,7 @@ function bindEvents(root) {
       ];
       state.messagesChatId = String(chatId);
       state.messagesError = "";
+      if (state.replyToMessage === replyMessage) state.replyToMessage = null;
       paint(root);
       scrollChatToBottom(root);
     } catch (error) {
@@ -940,6 +1338,7 @@ function bindEvents(root) {
         return;
       }
       state.chatDraft = text;
+      state.replyToMessage = replyMessage;
       paint(root);
       toast(error instanceof Error ? error.message : "Не удалось отправить сообщение.", "error");
     }
