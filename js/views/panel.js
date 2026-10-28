@@ -51,11 +51,18 @@ const moderatorPromises = new Map();
 const avatarUrlCache = new Map();
 const messageMediaCache = new Map();
 let chatRefreshTimer = null;
+let chatListRefreshTimer = null;
+let chatListRefreshInFlight = false;
+let chatListRefreshGeneration = 0;
 let messageOverlay = null;
 let longPressTimer = null;
 let avatarObserver = null;
 let messageMediaObserver = null;
 let enteringMessageIds = new Set();
+
+function hasExtendedChatAccess(user = getCurrentUser()) {
+  return String(user?.id || "") === EXTENDED_CHAT_ACCESS_USER_ID;
+}
 
 function getToastStack() {
   let stack = document.getElementById("toast-stack");
@@ -175,11 +182,27 @@ async function loadAiMetadata(chatId) {
   }
 }
 
+function startMessageRefreshTimer(root) {
+  if (chatRefreshTimer) window.clearInterval(chatRefreshTimer);
+  chatRefreshTimer = null;
+  if (state.selectedId === null) return;
+  chatRefreshTimer = window.setInterval(() => {
+    if (state.activeSection !== "chat" || state.selectedId === null || document.hidden) return;
+    void refreshMessages(root, state.selectedId);
+  }, 8000);
+}
+
 export async function renderPanel(root) {
+  chatListRefreshGeneration += 1;
   if (chatRefreshTimer) {
     window.clearInterval(chatRefreshTimer);
     chatRefreshTimer = null;
   }
+  if (chatListRefreshTimer) {
+    window.clearInterval(chatListRefreshTimer);
+    chatListRefreshTimer = null;
+  }
+  chatListRefreshInFlight = false;
   if (!(await restoreSession())) {
     navigate("/login", { replace: true });
     return;
@@ -220,11 +243,12 @@ export async function renderPanel(root) {
   state.loading = false;
   paint(root);
   scrollChatToBottom(root);
-  if (state.selectedId !== null) {
-    chatRefreshTimer = window.setInterval(() => {
-      if (state.activeSection !== "chat" || state.selectedId === null || document.hidden) return;
-      void refreshMessages(root, state.selectedId);
-    }, 8000);
+  startMessageRefreshTimer(root);
+  if (hasExtendedChatAccess()) {
+    chatListRefreshTimer = window.setInterval(() => {
+      if (document.hidden) return;
+      void refreshChatList(root);
+    }, 20_000);
   }
   if (state.activeSection === "settings" && state.activeTab === "ai" && state.selectedId) {
     const chatId = state.selectedId;
@@ -238,7 +262,7 @@ function paint(root) {
   closeMessageOverlay();
   avatarObserver?.disconnect();
   const user = getCurrentUser();
-  const hasExtendedChatAccess = String(user?.id || "") === EXTENDED_CHAT_ACCESS_USER_ID;
+  const extendedChatAccess = hasExtendedChatAccess(user);
   const selectedChat = state.chats.find((chat) => String(chat.id) === String(state.selectedId));
   const pageTitle = state.activeSection === "chat"
     ? selectedChat?.title || "Чат"
@@ -260,14 +284,14 @@ function paint(root) {
           <button class="icon-btn" id="logout-btn" title="Выйти">⎋</button>
         </div>
 
-        ${hasExtendedChatAccess ? `
+        ${extendedChatAccess ? `
           <label class="chat-search-field">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
             <input id="chat-search" type="search" value="${escapeHtml(state.chatSearch)}" placeholder="Поиск чатов" aria-label="Поиск чатов" autocomplete="off" />
           </label>
           <div class="chat-directory">
-            ${chatGroupHtml("admin", "Чаты", state.chats.filter((chat) => chat.isAdmin !== false), "Нет доступных чатов.")}
-            ${chatGroupHtml("bot", "Чаты, где есть бот", state.chats.filter((chat) => chat.isAdmin === false), "Нет других чатов с ботом.")}
+            ${chatGroupHtml("admin", "Чаты", sortChatsByLastActivity(state.chats.filter((chat) => chat.isAdmin !== false)), "Нет доступных чатов.")}
+            ${chatGroupHtml("bot", "Чаты, где есть бот", sortChatsByLastActivity(state.chats.filter((chat) => chat.isAdmin === false)), "Нет других чатов с ботом.")}
           </div>
         ` : `
           <div class="chat-list-label">Чаты</div>
@@ -393,6 +417,90 @@ function updateChatSearch(root, value) {
         ? "Ничего не найдено."
         : groupId === "admin" ? "Нет доступных чатов." : "Нет других чатов с ботом.";
     }
+  }
+}
+
+function chatActivityTimestamp(chat) {
+  const timestamp = Date.parse(chat.lastMessageAt || "");
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortChatsByLastActivity(chats) {
+  return chats
+    .map((chat, index) => ({ chat, index, timestamp: chatActivityTimestamp(chat) }))
+    .sort((a, b) => b.timestamp - a.timestamp || a.index - b.index)
+    .map(({ chat }) => chat);
+}
+
+function renderChatDirectory(root) {
+  const directory = root.querySelector(".chat-directory");
+  if (!directory || !hasExtendedChatAccess()) return;
+
+  const scrollTop = directory.scrollTop;
+  const adminChats = sortChatsByLastActivity(state.chats.filter((chat) => chat.isAdmin !== false));
+  const botChats = sortChatsByLastActivity(state.chats.filter((chat) => chat.isAdmin === false));
+  directory.innerHTML = `
+    ${chatGroupHtml("admin", "Чаты", adminChats, "Нет доступных чатов.")}
+    ${chatGroupHtml("bot", "Чаты, где есть бот", botChats, "Нет других чатов с ботом.")}
+  `;
+  directory.scrollTop = scrollTop;
+  updateChatSearch(root, state.chatSearch);
+  bindChatGroupToggles(root);
+  bindChatItemEvents(root);
+  hydrateAvatars(root);
+}
+
+function chatListSignature(chats) {
+  return JSON.stringify(chats.map((chat) => [
+    String(chat.id),
+    chat.title || "",
+    chat.type || "",
+    chat.isAdmin !== false,
+    chat.lastMessageAt || "",
+    chat.privacyAccepted !== false,
+  ]));
+}
+
+async function refreshChatList(root) {
+  if (!hasExtendedChatAccess() || chatListRefreshInFlight) return;
+  const generation = chatListRefreshGeneration;
+  chatListRefreshInFlight = true;
+  try {
+    const chats = await api.listChats();
+    if (generation !== chatListRefreshGeneration || !Array.isArray(chats)) return;
+    if (chatListSignature(chats) === chatListSignature(state.chats)) return;
+
+    const selectedStillExists = state.chats.some(
+      (chat) => String(chat.id) === String(state.selectedId),
+    );
+    state.chats = chats;
+    if (selectedStillExists) {
+      renderChatDirectory(root);
+      return;
+    }
+
+    const nextChat = state.chats[0] || null;
+    state.selectedId = nextChat?.id ?? null;
+    state.settings = nextChat?.settings || null;
+    state.settingsError = "";
+    state.messages = [];
+    state.messagesChatId = null;
+    state.messagesLoading = Boolean(nextChat);
+    state.messagesError = "";
+    state.replyToMessage = null;
+    state.chatDraft = "";
+    state.chatSending = nextChat ? state.sendingChatIds.has(String(nextChat.id)) : false;
+    if (nextChat) {
+      await Promise.allSettled([loadChat(nextChat.id), loadMessages(nextChat.id)]);
+    }
+    if (generation !== chatListRefreshGeneration) return;
+    paint(root);
+    if (state.activeSection === "chat") scrollChatToBottom(root);
+    startMessageRefreshTimer(root);
+  } catch {
+    // Preserve the last valid chat directory when a background refresh fails.
+  } finally {
+    if (generation === chatListRefreshGeneration) chatListRefreshInFlight = false;
   }
 }
 
@@ -1472,6 +1580,45 @@ function highlightChatMessage(root, messageId) {
   return true;
 }
 
+function bindChatGroupToggles(root) {
+  root.querySelectorAll("[data-chat-group-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const groupId = button.dataset.chatGroupToggle;
+      state.collapsedChatGroups[groupId] = !state.collapsedChatGroups[groupId];
+      const groupList = root.querySelector(`[data-chat-group-list="${groupId}"]`);
+      if (groupList) groupList.hidden = state.collapsedChatGroups[groupId];
+      button.setAttribute("aria-expanded", String(!state.collapsedChatGroups[groupId]));
+    });
+  });
+}
+
+function bindChatItemEvents(root) {
+  root.querySelectorAll(".chat-item").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const chatId = btn.dataset.chatId;
+      if (state.messagesChatId && state.messagesChatId !== String(chatId)) clearMessageMediaCache();
+      state.selectedId = chatId;
+      state.activeSection = "chat";
+      state.settings = null;
+      state.settingsError = "";
+      state.messages = [];
+      state.messagesChatId = String(chatId);
+      state.messagesLimit = 200;
+      state.messagesLoading = true;
+      state.messagesError = "";
+      state.chatDraft = "";
+      state.replyToMessage = null;
+      state.chatSending = state.sendingChatIds.has(String(chatId));
+      paint(root);
+      await Promise.allSettled([loadChat(chatId), loadMessages(chatId)]);
+      if (state.selectedId !== chatId) return;
+      if (state.activeSection === "settings" && state.activeTab === "ai") await loadAiMetadata(chatId);
+      paint(root);
+      if (state.activeSection === "chat") scrollChatToBottom(root);
+    });
+  });
+}
+
 async function jumpToReplyTarget(root, messageId, trigger) {
   if (highlightChatMessage(root, messageId)) return;
   const chatId = state.selectedId;
@@ -1515,6 +1662,11 @@ function bindEvents(root) {
       window.clearInterval(chatRefreshTimer);
       chatRefreshTimer = null;
     }
+    if (chatListRefreshTimer) {
+      window.clearInterval(chatListRefreshTimer);
+      chatListRefreshTimer = null;
+    }
+    chatListRefreshGeneration += 1;
     logout();
     navigate("/login", { replace: true });
   });
@@ -1533,38 +1685,8 @@ function bindEvents(root) {
     updateChatSearch(root, event.currentTarget.value);
   });
 
-  root.querySelectorAll("[data-chat-group-toggle]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const groupId = button.dataset.chatGroupToggle;
-      state.collapsedChatGroups[groupId] = !state.collapsedChatGroups[groupId];
-      paint(root);
-    });
-  });
-
-  root.querySelectorAll(".chat-item").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const chatId = btn.dataset.chatId;
-      if (state.messagesChatId && state.messagesChatId !== String(chatId)) clearMessageMediaCache();
-      state.selectedId = chatId;
-      state.activeSection = "chat";
-      state.settings = null;
-      state.settingsError = "";
-      state.messages = [];
-      state.messagesChatId = String(chatId);
-      state.messagesLimit = 200;
-      state.messagesLoading = true;
-      state.messagesError = "";
-      state.chatDraft = "";
-      state.replyToMessage = null;
-      state.chatSending = state.sendingChatIds.has(String(chatId));
-      paint(root);
-      await Promise.allSettled([loadChat(chatId), loadMessages(chatId)]);
-      if (state.selectedId !== chatId) return;
-      if (state.activeSection === "settings" && state.activeTab === "ai") await loadAiMetadata(chatId);
-      paint(root);
-      if (state.activeSection === "chat") scrollChatToBottom(root);
-    });
-  });
+  bindChatGroupToggles(root);
+  bindChatItemEvents(root);
 
   root.querySelectorAll(".section-tab").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -1680,6 +1802,7 @@ function bindEvents(root) {
       paint(root);
       enteringMessageIds.clear();
       scrollChatToBottom(root);
+      void refreshChatList(root);
     } catch (error) {
       state.sendingChatIds.delete(chatKey);
       state.chatSending = state.sendingChatIds.has(String(state.selectedId));
