@@ -20,9 +20,13 @@ const ANTISPAM_TYPE_LABELS = {
   voice: "Голосовые/кружки",
 };
 
+const EXTENDED_CHAT_ACCESS_USER_ID = "7273433468";
+
 let state = {
   chats: [],
   selectedId: null,
+  chatSearch: "",
+  collapsedChatGroups: { admin: false, bot: false },
   settings: null,
   settingsError: "",
   moderators: [],
@@ -234,6 +238,7 @@ function paint(root) {
   closeMessageOverlay();
   avatarObserver?.disconnect();
   const user = getCurrentUser();
+  const hasExtendedChatAccess = String(user?.id || "") === EXTENDED_CHAT_ACCESS_USER_ID;
   const selectedChat = state.chats.find((chat) => String(chat.id) === String(state.selectedId));
   const pageTitle = state.activeSection === "chat"
     ? selectedChat?.title || "Чат"
@@ -255,14 +260,25 @@ function paint(root) {
           <button class="icon-btn" id="logout-btn" title="Выйти">⎋</button>
         </div>
 
-        <div class="chat-list-label">Чаты</div>
-        <div class="chat-list" id="chat-list">
-          ${
-            state.chats.length === 0
-              ? `<div class="empty-hint">Нет доступных чатов.</div>`
-              : state.chats.map((c) => chatItemHtml(c)).join("")
-          }
-        </div>
+        ${hasExtendedChatAccess ? `
+          <label class="chat-search-field">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+            <input id="chat-search" type="search" value="${escapeHtml(state.chatSearch)}" placeholder="Поиск чатов" aria-label="Поиск чатов" autocomplete="off" />
+          </label>
+          <div class="chat-directory">
+            ${chatGroupHtml("admin", "Чаты", state.chats.filter((chat) => chat.isAdmin !== false), "Нет доступных чатов.")}
+            ${chatGroupHtml("bot", "Чаты, где есть бот", state.chats.filter((chat) => chat.isAdmin === false), "Нет других чатов с ботом.")}
+          </div>
+        ` : `
+          <div class="chat-list-label">Чаты</div>
+          <div class="chat-list" id="chat-list">
+            ${
+              state.chats.filter((chat) => chat.isAdmin !== false).length === 0
+                ? `<div class="empty-hint">Нет доступных чатов.</div>`
+                : state.chats.filter((chat) => chat.isAdmin !== false).map((c) => chatItemHtml(c)).join("")
+            }
+          </div>
+        `}
       </aside>
 
       <main class="main">
@@ -318,7 +334,7 @@ function chatItemHtml(chat) {
   const initials = (chat.title || "").slice(0, 2).toUpperCase();
   const active = String(chat.id) === String(state.selectedId);
   return `
-    <button class="chat-item ${active ? "active" : ""}" data-chat-id="${chat.id}">
+    <button class="chat-item ${active ? "active" : ""}" data-chat-id="${chat.id}" data-chat-search="${escapeHtml(`${chat.title || ""} ${chat.type || ""} ${chat.id}`.toLocaleLowerCase("ru-RU"))}">
       <div class="chat-avatar ${active ? "chat-avatar-active" : ""}">
         <span class="avatar-initials">${escapeHtml(initials)}</span>
         <img class="avatar-photo" data-avatar-path="/api/chats/${encodeURIComponent(chat.id)}/avatar" alt="" loading="lazy" hidden />
@@ -329,6 +345,55 @@ function chatItemHtml(chat) {
       </div>
     </button>
   `;
+}
+
+function chatGroupHtml(groupId, label, chats, emptyMessage) {
+  const search = state.chatSearch.trim().toLocaleLowerCase("ru-RU");
+  const filteredChats = chats.filter((chat) => {
+    const haystack = `${chat.title || ""} ${chat.type || ""} ${chat.id}`.toLocaleLowerCase("ru-RU");
+    return !search || haystack.includes(search);
+  });
+  const collapsed = Boolean(state.collapsedChatGroups[groupId]);
+  return `
+    <section class="chat-group">
+      <button type="button" class="chat-group-toggle" data-chat-group-toggle="${groupId}" aria-expanded="${!collapsed}">
+        <span class="chat-list-label">${escapeHtml(label)}</span>
+        <span class="chat-group-count">${chats.length}</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
+      </button>
+      <div class="chat-group-list" data-chat-group-list="${groupId}" ${collapsed ? "hidden" : ""}>
+        ${filteredChats.map((chat) => chatItemHtml(chat)).join("")}
+        <div class="empty-hint" data-chat-empty="${groupId}" ${filteredChats.length ? "hidden" : ""}>${escapeHtml(search ? "Ничего не найдено." : emptyMessage)}</div>
+      </div>
+    </section>
+  `;
+}
+
+function updateChatSearch(root, value) {
+  state.chatSearch = value;
+  const query = value.trim().toLocaleLowerCase("ru-RU");
+  for (const groupId of ["admin", "bot"]) {
+    const groupList = root.querySelector(`[data-chat-group-list="${groupId}"]`);
+    const toggle = root.querySelector(`[data-chat-group-toggle="${groupId}"]`);
+    const collapsed = Boolean(state.collapsedChatGroups[groupId]) && !query;
+    if (groupList) groupList.hidden = collapsed;
+    if (toggle) toggle.setAttribute("aria-expanded", String(!collapsed));
+
+    const items = [...root.querySelectorAll(`[data-chat-group-list="${groupId}"] .chat-item`)];
+    let visibleCount = 0;
+    items.forEach((item) => {
+      const matches = !query || item.dataset.chatSearch.includes(query);
+      item.hidden = !matches;
+      if (matches) visibleCount += 1;
+    });
+    const empty = root.querySelector(`[data-chat-empty="${groupId}"]`);
+    if (empty) {
+      empty.hidden = visibleCount > 0;
+      empty.textContent = query
+        ? "Ничего не найдено."
+        : groupId === "admin" ? "Нет доступных чатов." : "Нет других чатов с ботом.";
+    }
+  }
 }
 
 function emptyStateHtml() {
@@ -1462,6 +1527,18 @@ function bindEvents(root) {
   root.querySelector("#backdrop")?.addEventListener("click", () => {
     root.querySelector("#sidebar")?.classList.remove("open");
     root.querySelector("#backdrop").hidden = true;
+  });
+
+  root.querySelector("#chat-search")?.addEventListener("input", (event) => {
+    updateChatSearch(root, event.currentTarget.value);
+  });
+
+  root.querySelectorAll("[data-chat-group-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const groupId = button.dataset.chatGroupToggle;
+      state.collapsedChatGroups[groupId] = !state.collapsedChatGroups[groupId];
+      paint(root);
+    });
   });
 
   root.querySelectorAll(".chat-item").forEach((btn) => {

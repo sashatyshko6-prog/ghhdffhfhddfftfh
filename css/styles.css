@@ -146,6 +146,24 @@ input, select, textarea { font-family: inherit; }
 .chat-list-label { font-size: 12px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.08em; padding: 6px 10px; }
 .chat-list { display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; }
 .empty-hint { color: var(--text-muted); font-size: 14px; padding: 8px 10px; }
+.chat-search-field {
+  display: flex; height: 40px; flex: 0 0 40px; align-items: center; gap: 9px; margin: -8px 2px 0; padding: 0 11px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--input-bg); color: var(--text-muted);
+}
+.chat-search-field:focus-within { border-color: var(--accent); color: var(--accent); }
+.chat-search-field svg { width: 17px; height: 17px; flex: 0 0 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.chat-search-field input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 13px; }
+.chat-search-field input::placeholder { color: var(--text-faint); }
+.chat-directory { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 8px; overflow-y: auto; overscroll-behavior: contain; }
+.chat-group { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; }
+.chat-group-toggle { display: flex; min-height: 34px; align-items: center; gap: 5px; padding: 0 7px 0 0; border: 0; border-radius: 7px; background: transparent; text-align: left; }
+.chat-group-toggle:hover { background: rgba(255,255,255,.035); }
+.chat-group-toggle .chat-list-label { flex: 1; }
+.chat-group-count { color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chat-group-toggle svg { width: 15px; height: 15px; flex: 0 0 15px; fill: none; stroke: var(--text-faint); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; transition: transform .15s ease; }
+.chat-group-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.chat-group-list { display: flex; flex-direction: column; gap: 2px; }
+.chat-group-list[hidden], .chat-group-list .chat-item[hidden], .chat-group-list .empty-hint[hidden] { display: none !important; }
 
 .chat-item {
   display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 9px;
