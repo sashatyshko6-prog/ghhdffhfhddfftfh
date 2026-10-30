@@ -59,6 +59,7 @@ let aiProvidersPromise = null;
 const moderatorPromises = new Map();
 const avatarUrlCache = new Map();
 const messageMediaCache = new Map();
+const messageRefreshInFlight = new Set();
 let chatRefreshTimer = null;
 let chatListRefreshTimer = null;
 let chatListRefreshInFlight = false;
@@ -87,6 +88,7 @@ function readRecentStickers() {
 function rememberSticker(sticker) {
   const entry = {
     file_id: sticker.file_id,
+    file_unique_id: sticker.file_unique_id || "",
     thumbnail_file_id: sticker.thumbnail_file_id || sticker.file_id,
     set_name: sticker.set_name,
     emoji: sticker.emoji || "",
@@ -161,15 +163,16 @@ async function loadMessages(chatId) {
 }
 
 async function refreshMessages(root, chatId) {
+  const chatKey = String(chatId);
+  if (messageRefreshInFlight.has(chatKey)) return;
+  messageRefreshInFlight.add(chatKey);
   try {
     const response = await api.listMessages(chatId, state.messagesLimit);
     const messages = Array.isArray(response) ? response : response?.messages;
     if (!Array.isArray(messages) || String(state.selectedId) !== String(chatId)) return;
-    const currentIds = state.messages.map((message) => String(message.message_id)).join(",");
-    const nextIds = messages.map((message) => String(message.message_id)).join(",");
-    const contentChanged = currentIds !== nextIds || messages.some((message, index) => {
+    const contentChanged = messages.length !== state.messages.length || messages.some((message, index) => {
       const current = state.messages[index];
-      return current && (current.text !== message.text || current.username !== message.username);
+      return !current || JSON.stringify(current) !== JSON.stringify(message);
     });
     if (!contentChanged) return;
 
@@ -201,6 +204,8 @@ async function refreshMessages(root, chatId) {
     }
   } catch {
     // Keep the last good history; the visible refresh button can report a manual retry.
+  } finally {
+    messageRefreshInFlight.delete(chatKey);
   }
 }
 
@@ -364,7 +369,7 @@ function paint(root) {
             ${
               state.chats.filter((chat) => chat.isAdmin !== false).length === 0
                 ? `<div class="empty-hint">Нет доступных чатов.</div>`
-                : state.chats.filter((chat) => chat.isAdmin !== false).map((c) => chatItemHtml(c)).join("")
+                : sortChatsByLastActivity(state.chats.filter((chat) => chat.isAdmin !== false)).map((c) => chatItemHtml(c)).join("")
             }
           </div>
         `}
@@ -535,19 +540,14 @@ async function refreshChatList(root) {
     if (generation !== chatListRefreshGeneration || !Array.isArray(chats)) return;
     if (chatListSignature(chats) === chatListSignature(state.chats)) return;
 
-    const selectedChat = state.chats.find(
-      (chat) => String(chat.id) === String(state.selectedId),
-    );
     const selectedStillExists = chats.some(
       (chat) => String(chat.id) === String(state.selectedId),
     );
-    // A background list response is never allowed to change the user's
-    // current chat. Keep a stale selected entry until the user chooses
-    // another chat or reloads the panel.
-    state.chats = selectedChat && state.selectedId !== null && !selectedStillExists
-      ? [...chats, selectedChat]
-      : chats;
-    if (state.selectedId !== null) {
+    state.chats = chats;
+    // Keep the current selection unless the server positively confirms it is
+    // no longer accessible. Telegram lookup errors are served from the
+    // backend's last-known-good membership cache.
+    if (state.selectedId !== null && selectedStillExists) {
       renderChatDirectory(root);
       return;
     }
@@ -670,8 +670,21 @@ function loadMessageMedia(container) {
   cached.promise.then((media) => {
     if (!container.isConnected) return;
     if (!media?.url) {
-      container.innerHTML = `<span class="chat-media-unavailable">Медиа недоступно</span>`;
+      container.innerHTML = container.dataset.mediaKind === "sticker"
+        ? `<span class="chat-sticker-fallback" role="img">${escapeHtml(container.dataset.mediaFallback || "Стикер")}</span>`
+        : `<span class="chat-media-unavailable">Медиа недоступно</span>`;
       messageMediaCache.delete(path);
+      return;
+    }
+
+    if (media.contentType.startsWith("audio/") || ["voice", "audio"].includes(container.dataset.mediaKind)) {
+      const audio = document.createElement("audio");
+      audio.className = "chat-media-audio";
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = media.url;
+      audio.setAttribute("aria-label", container.dataset.mediaKind === "voice" ? "Голосовое сообщение" : "Аудиосообщение");
+      container.replaceChildren(audio);
       return;
     }
 
@@ -698,10 +711,14 @@ function loadMessageMedia(container) {
       return;
     }
 
-    container.innerHTML = `<span class="chat-media-unavailable">Формат медиа не поддерживается для предпросмотра</span>`;
+    container.innerHTML = container.dataset.mediaKind === "sticker"
+      ? `<span class="chat-sticker-fallback" role="img">${escapeHtml(container.dataset.mediaFallback || "Стикер")}</span>`
+      : `<span class="chat-media-unavailable">Формат медиа не поддерживается для предпросмотра</span>`;
   }).catch(() => {
     if (container.isConnected) {
-      container.innerHTML = `<span class="chat-media-unavailable">Не удалось загрузить медиа</span>`;
+      container.innerHTML = container.dataset.mediaKind === "sticker"
+        ? `<span class="chat-sticker-fallback" role="img">${escapeHtml(container.dataset.mediaFallback || "Стикер")}</span>`
+        : `<span class="chat-media-unavailable">Не удалось загрузить медиа</span>`;
     }
     messageMediaCache.delete(path);
   });
@@ -814,17 +831,18 @@ function chatMessageMediaHtml(message) {
     `;
   }
 
+  if (type === "voice" || type === "audio") {
+    return `<div class="chat-message-media audio" data-media-path="/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(messageId)}/media" data-media-kind="${escapeHtml(type)}" aria-label="${type === "voice" ? "Голосовое сообщение" : "Аудиосообщение"}"><span class="chat-media-loading">${type === "voice" ? "Загрузка голосового…" : "Загрузка аудио…"}</span></div>`;
+  }
+
   if (!["photo", "sticker", "animation", "gif"].includes(type)) return "";
   let mediaPath = `/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(messageId)}/media`;
   if (type === "sticker" && (message.is_animated || message.is_video)) {
-    if (!message.has_thumbnail) {
-      return `<div class="chat-sticker-fallback" role="img" aria-label="Анимированный стикер">${escapeHtml(message.sticker_emoji || "Анимированный стикер")}</div>`;
-    }
     mediaPath += "?thumbnail=1";
   }
   const kind = type === "gif" ? "animation" : type;
   const label = kind === "photo" ? "Загрузка фото…" : kind === "sticker" ? "Загрузка стикера…" : "Загрузка GIF…";
-  return `<div class="chat-message-media ${kind === "sticker" ? "sticker" : ""}" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="${escapeHtml(kind)}" aria-label="${escapeHtml(label)}"><span class="chat-media-loading">${escapeHtml(label)}</span></div>`;
+  return `<div class="chat-message-media ${kind === "sticker" ? "sticker" : ""}" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="${escapeHtml(kind)}" data-media-fallback="${escapeHtml(message.sticker_emoji || "Стикер")}" aria-label="${escapeHtml(label)}"><span class="chat-media-loading">${escapeHtml(label)}</span></div>`;
 }
 
 function replyPreviewHtml(message) {
@@ -871,7 +889,7 @@ function stickerPickerHtml() {
     const mediaPath = `/api/sticker-library/sticker-media?file_id=${encodeURIComponent(previewId)}&set_name=${encodeURIComponent(setName)}`;
     const searchValue = `${item.emoji || ""} ${item.set_title || ""} ${setName}`.toLocaleLowerCase("ru-RU");
     return `
-      <button type="button" class="sticker-picker-item" data-sticker-send data-file-id="${escapeHtml(item.file_id)}" data-set-name="${escapeHtml(setName)}" data-emoji="${escapeHtml(item.emoji || "")}" data-thumbnail-file-id="${escapeHtml(previewId)}" data-set-title="${escapeHtml(item.set_title || setName)}" data-picker-search="${escapeHtml(searchValue)}" title="${escapeHtml(`${item.emoji || ""} ${item.set_title || setName}`.trim())}">
+      <button type="button" class="sticker-picker-item" data-sticker-send data-file-id="${escapeHtml(item.file_id)}" data-file-unique-id="${escapeHtml(item.file_unique_id || "")}" data-set-name="${escapeHtml(setName)}" data-emoji="${escapeHtml(item.emoji || "")}" data-thumbnail-file-id="${escapeHtml(previewId)}" data-set-title="${escapeHtml(item.set_title || setName)}" data-picker-search="${escapeHtml(searchValue)}" title="${escapeHtml(`${item.emoji || ""} ${item.set_title || setName}`.trim())}">
         <span class="sticker-picker-media" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="sticker"><span class="sticker-picker-placeholder">${escapeHtml(item.emoji || "☺")}</span></span>
         ${item.emoji ? `<span class="sticker-picker-caption">${escapeHtml(item.emoji)}</span>` : ""}
       </button>
@@ -959,6 +977,7 @@ function bindStickerPickerEvents(root) {
     button.addEventListener("click", () => {
       void sendStickerFromPicker(root, {
         file_id: button.dataset.fileId,
+        file_unique_id: button.dataset.fileUniqueId,
         thumbnail_file_id: button.dataset.thumbnailFileId,
         set_name: button.dataset.setName,
         set_title: button.dataset.setTitle,

@@ -175,6 +175,7 @@ export const api = {
   sendSticker: (chatId, sticker, replyToMessageId = null) =>
     request("POST", `/api/chats/${encodeURIComponent(chatId)}/send-sticker`, {
       file_id: sticker.file_id,
+      file_unique_id: sticker.file_unique_id || "",
       set_name: sticker.set_name,
       ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
     }),
