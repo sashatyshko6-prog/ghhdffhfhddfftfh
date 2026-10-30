@@ -51,6 +51,8 @@ let state = {
   recentStickers: [],
   chatSending: false,
   sendingChatIds: new Set(),
+  audioKind: "music",
+  audioMessageId: null,
   loading: true,
   saving: false,
 };
@@ -59,6 +61,7 @@ let aiProvidersPromise = null;
 const moderatorPromises = new Map();
 const avatarUrlCache = new Map();
 const messageMediaCache = new Map();
+const voiceWaveformCache = new Map();
 const messageRefreshInFlight = new Set();
 let chatRefreshTimer = null;
 let chatListRefreshTimer = null;
@@ -71,6 +74,9 @@ let messageMediaObserver = null;
 let enteringMessageIds = new Set();
 let chatSelectionGeneration = 0;
 let stickerLibraryLoadGeneration = 0;
+let chatAudioElement = null;
+let audioMessageGeneration = 0;
+let audioPlayerOverlay = null;
 
 function hasExtendedChatAccess(user = getCurrentUser()) {
   return String(user?.id || "") === EXTENDED_CHAT_ACCESS_USER_ID;
@@ -647,12 +653,595 @@ function hydrateAvatars(root) {
 }
 
 function clearMessageMediaCache() {
+  stopChatAudio();
   for (const cached of messageMediaCache.values()) {
     cached.promise.then((media) => {
       if (media?.url) URL.revokeObjectURL(media.url);
     }).catch(() => {});
   }
   messageMediaCache.clear();
+  voiceWaveformCache.clear();
+}
+
+const VOICE_WAVEFORM_BAR_COUNT = 48;
+const VOICE_PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.8c0-.8.9-1.3 1.6-.8l9.3 6.2a1 1 0 0 1 0 1.6l-9.3 6.2c-.7.5-1.6 0-1.6-.8V5.8Z"/></svg>';
+const VOICE_PAUSE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM15 5h4v14h-4z"/></svg>';
+
+function formatPlaybackTime(value) {
+  const seconds = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function getVoiceWaveform(path, blob) {
+  if (voiceWaveformCache.has(path)) return voiceWaveformCache.get(path);
+  const waveformPromise = (async () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass || !blob) return null;
+    let context;
+    try {
+      context = new AudioContextClass();
+      const decoded = await context.decodeAudioData(await blob.arrayBuffer());
+      const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) => decoded.getChannelData(index));
+      const levels = [];
+
+      for (let bar = 0; bar < VOICE_WAVEFORM_BAR_COUNT; bar += 1) {
+        const start = Math.floor((bar * decoded.length) / VOICE_WAVEFORM_BAR_COUNT);
+        const end = Math.max(start + 1, Math.floor(((bar + 1) * decoded.length) / VOICE_WAVEFORM_BAR_COUNT));
+        const stride = Math.max(1, Math.floor((end - start) / 160));
+        let sumSquares = 0;
+        let peak = 0;
+        let samples = 0;
+        for (let index = start; index < end; index += stride) {
+          let samplePower = 0;
+          for (const channel of channels) {
+            const sample = channel[index] || 0;
+            const magnitude = Math.abs(sample);
+            samplePower += sample * sample / Math.max(1, channels.length);
+            peak = Math.max(peak, magnitude);
+          }
+          sumSquares += samplePower;
+          samples += 1;
+        }
+        const rms = Math.sqrt(sumSquares / Math.max(1, samples));
+        levels.push(rms * 0.72 + peak * 0.28);
+      }
+
+      const maximum = Math.max(...levels, 0.00001);
+      return levels.map((level) => Math.round(5 + 29 * Math.pow(level / maximum, 0.72)));
+    } catch {
+      return null;
+    } finally {
+      if (context) void context.close().catch(() => {});
+    }
+  })();
+  voiceWaveformCache.set(path, waveformPromise);
+  return waveformPromise;
+}
+
+function normalizeAudioKind(value) {
+  const type = String(typeof value === "object" ? value?.type : value || "").toLowerCase();
+  if (type === "voice") return "voice";
+  if (type === "music" || type === "audio") return "music";
+  if (type === "document" && /\.(mp3|m4a|aac|flac|wav|ogg|opus|oga)$/i.test(String(value?.file_name || ""))) return "music";
+  return null;
+}
+
+function getAudioMessages(kind = null) {
+  return state.messages.filter((message) => {
+    const messageKind = normalizeAudioKind(message);
+    return message.has_media && messageKind && (!kind || messageKind === kind);
+  });
+}
+
+function audioMessageTitle(message) {
+  if (normalizeAudioKind(message) === "voice") return "Голосовое сообщение";
+  const filename = String(message.file_name || "").replace(/\.[^.]+$/, "");
+  return String(message.title || filename || message.caption || "Музыка");
+}
+
+function audioMessagePerformer(message) {
+  if (normalizeAudioKind(message) === "voice") {
+    return String(message.sender_name || message.user_name || message.username || "");
+  }
+  return String(message.performer || message.sender_name || message.user_name || message.username || "");
+}
+
+function audioMediaPath(message) {
+  return `/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(message.message_id)}/media`;
+}
+
+function getSelectedAudioMessage() {
+  const kind = state.audioKind || "music";
+  const current = state.messages.find((message) =>
+    String(message.message_id) === String(state.audioMessageId) &&
+    normalizeAudioKind(message) === kind &&
+    message.has_media
+  );
+  const messages = getAudioMessages(kind);
+  return current || messages[messages.length - 1] || getAudioMessages()[getAudioMessages().length - 1] || null;
+}
+
+function getMessageMedia(path) {
+  let cached = messageMediaCache.get(path);
+  if (!cached) {
+    cached = { promise: api.fetchMessageMedia(path) };
+    messageMediaCache.set(path, cached);
+  }
+  return cached.promise;
+}
+
+function ensureChatAudioElement() {
+  if (chatAudioElement) return chatAudioElement;
+  chatAudioElement = document.createElement("audio");
+  chatAudioElement.className = "chat-audio-engine";
+  chatAudioElement.preload = "metadata";
+  chatAudioElement.setAttribute("aria-hidden", "true");
+  chatAudioElement.addEventListener("play", updateAudioPlayerViews);
+  chatAudioElement.addEventListener("pause", updateAudioPlayerViews);
+  chatAudioElement.addEventListener("ended", updateAudioPlayerViews);
+  chatAudioElement.addEventListener("loadedmetadata", updateAudioPlayerViews);
+  chatAudioElement.addEventListener("durationchange", updateAudioPlayerViews);
+  chatAudioElement.addEventListener("timeupdate", updateAudioPlayerViews);
+  document.body.appendChild(chatAudioElement);
+  return chatAudioElement;
+}
+
+function updateAudioPlayerViews() {
+  const audio = chatAudioElement;
+  const selected = getSelectedAudioMessage();
+  const currentMessageId = audio?.dataset.messageId || "";
+  const currentChatId = audio?.dataset.chatId || "";
+  const isCurrent = Boolean(
+    audio &&
+    selected &&
+    currentChatId === String(state.selectedId) &&
+    currentMessageId === String(selected.message_id) &&
+    String(state.audioMessageId) === currentMessageId
+  );
+  const duration = isCurrent && Number.isFinite(audio.duration) && audio.duration > 0
+    ? audio.duration
+    : Number(selected?.duration) || 0;
+  const currentTime = isCurrent ? audio.currentTime || 0 : 0;
+  const progress = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
+  const playing = isCurrent && !audio.paused;
+
+  document.querySelectorAll("[data-audio-mini]").forEach((mini) => {
+    const title = mini.querySelector("[data-audio-mini-title]");
+    const performer = mini.querySelector("[data-audio-mini-performer]");
+    const toggle = mini.querySelector("[data-audio-toggle]");
+    const current = mini.querySelector("[data-audio-mini-current]");
+    const total = mini.querySelector("[data-audio-mini-duration]");
+    const progressBar = mini.querySelector(".audio-mini-progress > span");
+    if (title) title.textContent = selected ? audioMessageTitle(selected) : "Аудио в чате";
+    if (performer) performer.textContent = selected ? audioMessagePerformer(selected) : "";
+    if (current) current.textContent = formatPlaybackTime(currentTime);
+    if (total) total.textContent = formatPlaybackTime(duration);
+    if (progressBar) progressBar.style.width = `${progress * 100}%`;
+    if (toggle) {
+      toggle.innerHTML = playing ? VOICE_PAUSE_ICON : VOICE_PLAY_ICON;
+      toggle.setAttribute("aria-label", playing ? "Пауза" : "Воспроизвести");
+      toggle.title = playing ? "Пауза" : "Воспроизвести";
+    }
+    mini.querySelectorAll("[data-audio-kind]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.audioKind === state.audioKind);
+      button.setAttribute("aria-pressed", String(button.dataset.audioKind === state.audioKind));
+    });
+  });
+
+  document.querySelectorAll("[data-audio-message-player]").forEach((player) => {
+    const playerIsCurrent = isCurrent && player.dataset.audioMessageId === currentMessageId;
+    const item = state.messages.find((message) => String(message.message_id) === player.dataset.audioMessageId);
+    const itemDuration = playerIsCurrent ? duration : Number(item?.duration) || Number(player.dataset.audioDuration) || 0;
+    const itemTime = playerIsCurrent ? currentTime : 0;
+    const itemProgress = itemDuration > 0 ? Math.min(1, itemTime / itemDuration) : 0;
+    player.classList.toggle("is-playing", playerIsCurrent && playing);
+    player.querySelectorAll("[data-audio-play]").forEach((button) => {
+      const buttonPlaying = playerIsCurrent && playing;
+      button.innerHTML = buttonPlaying ? VOICE_PAUSE_ICON : VOICE_PLAY_ICON;
+      button.setAttribute("aria-label", buttonPlaying ? "Поставить на паузу" : "Воспроизвести");
+      button.title = buttonPlaying ? "Пауза" : "Воспроизвести";
+    });
+    const currentLabel = player.querySelector("[data-audio-current]");
+    const durationLabel = player.querySelector("[data-audio-duration]");
+    if (currentLabel) currentLabel.textContent = formatPlaybackTime(itemTime);
+    if (durationLabel) durationLabel.textContent = formatPlaybackTime(itemDuration);
+    const waveBars = player.querySelectorAll("[data-voice-wave-bar]");
+    waveBars.forEach((bar, index) => {
+      bar.classList.toggle("is-played", index < Math.floor(itemProgress * waveBars.length));
+    });
+    const waveform = player.querySelector(".voice-waveform");
+    if (waveform) {
+      waveform.setAttribute("aria-valuenow", String(Math.round(itemProgress * 100)));
+      waveform.setAttribute("aria-valuetext", `${formatPlaybackTime(itemTime)} из ${formatPlaybackTime(itemDuration)}`);
+    }
+    const progressBar = player.querySelector(".music-player-progress > span");
+    if (progressBar) progressBar.style.width = `${itemProgress * 100}%`;
+  });
+
+  if (audioPlayerOverlay) {
+    const title = audioPlayerOverlay.querySelector("[data-audio-full-title]");
+    const performer = audioPlayerOverlay.querySelector("[data-audio-full-performer]");
+    const current = audioPlayerOverlay.querySelector("[data-audio-full-current]");
+    const total = audioPlayerOverlay.querySelector("[data-audio-full-duration]");
+    const toggle = audioPlayerOverlay.querySelector("[data-audio-full-toggle]");
+    const seek = audioPlayerOverlay.querySelector("[data-audio-full-seek]");
+    if (title && selected) title.textContent = audioMessageTitle(selected);
+    if (performer && selected) performer.textContent = audioMessagePerformer(selected) || (state.audioKind === "voice" ? "Голосовое" : "Исполнитель не указан");
+    if (current) current.textContent = formatPlaybackTime(currentTime);
+    if (total) total.textContent = formatPlaybackTime(duration);
+    if (seek && document.activeElement !== seek) {
+      seek.max = String(Math.max(1, Math.floor(duration * 10)));
+      seek.value = String(Math.floor(currentTime * 10));
+    }
+    if (toggle) {
+      toggle.innerHTML = playing ? VOICE_PAUSE_ICON : VOICE_PLAY_ICON;
+      toggle.setAttribute("aria-label", playing ? "Пауза" : "Воспроизвести");
+    }
+    audioPlayerOverlay.querySelectorAll("[data-audio-track-id]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.audioTrackId === String(state.audioMessageId));
+    });
+  }
+}
+
+function stopChatAudio() {
+  audioMessageGeneration += 1;
+  if (chatAudioElement) {
+    chatAudioElement.pause();
+    chatAudioElement.removeAttribute("src");
+    delete chatAudioElement.dataset.messageId;
+    delete chatAudioElement.dataset.chatId;
+    chatAudioElement.load();
+  }
+  state.audioMessageId = null;
+  closeAudioPlayer();
+}
+
+async function selectAudioMessage(message, { autoplay = false } = {}) {
+  const kind = normalizeAudioKind(message);
+  if (!message || !kind || !message.has_media || state.selectedId === null) return false;
+  state.audioKind = kind;
+  state.audioMessageId = String(message.message_id);
+  const generation = ++audioMessageGeneration;
+  const chatId = String(state.selectedId);
+  const path = audioMediaPath(message);
+  const audio = ensureChatAudioElement();
+  const sameSource = audio.dataset.chatId === chatId && audio.dataset.messageId === String(message.message_id) && audio.src;
+
+  if (!sameSource) {
+    audio.pause();
+    const media = await getMessageMedia(path).catch(() => {
+      messageMediaCache.delete(path);
+      return null;
+    });
+    if (generation !== audioMessageGeneration || String(state.selectedId) !== chatId) return false;
+    if (!media?.url) {
+      messageMediaCache.delete(path);
+      toast("Не удалось загрузить аудиосообщение.", "error");
+      return false;
+    }
+    audio.src = media.url;
+    audio.dataset.chatId = chatId;
+    audio.dataset.messageId = String(message.message_id);
+    audio.load();
+  }
+
+  updateAudioPlayerViews();
+  if (autoplay) {
+    try {
+      await audio.play();
+      return true;
+    } catch {
+      toast("Нажми воспроизведение ещё раз после загрузки аудио.", "error");
+      return false;
+    }
+  }
+  return true;
+}
+
+function toggleAudioMessage(message) {
+  if (!message) return;
+  const audio = ensureChatAudioElement();
+  const isSelected = audio.dataset.chatId === String(state.selectedId) &&
+    audio.dataset.messageId === String(message.message_id) &&
+    String(state.audioMessageId) === String(message.message_id);
+  if (isSelected && !audio.paused) {
+    audio.pause();
+    return;
+  }
+  if (isSelected && audio.src) {
+    void audio.play().catch(() => toast("Не удалось воспроизвести аудио.", "error"));
+    return;
+  }
+  void selectAudioMessage(message, { autoplay: true });
+}
+
+function seekAudioMessage(message, position) {
+  const audio = ensureChatAudioElement();
+  const messageId = String(message.message_id);
+  const applySeek = () => {
+    if (
+      audio.dataset.chatId !== String(state.selectedId) ||
+      audio.dataset.messageId !== messageId ||
+      !Number.isFinite(audio.duration) ||
+      audio.duration <= 0
+    ) return false;
+    const ratio = typeof position === "function" ? position(audio) : position;
+    audio.currentTime = Math.min(1, Math.max(0, ratio)) * audio.duration;
+    updateAudioPlayerViews();
+    return true;
+  };
+  if (applySeek()) return;
+  const onMetadata = () => {
+    audio.removeEventListener("loadedmetadata", onMetadata);
+    applySeek();
+  };
+  audio.addEventListener("loadedmetadata", onMetadata);
+  void selectAudioMessage(message).then((selected) => {
+    if (!selected) audio.removeEventListener("loadedmetadata", onMetadata);
+    else applySeek();
+  });
+}
+
+function switchAudioKind(kind) {
+  if (!["voice", "music"].includes(kind)) return;
+  const messages = getAudioMessages(kind);
+  if (!messages.length) return;
+  const continuePlayback = Boolean(chatAudioElement && !chatAudioElement.paused);
+  state.audioKind = kind;
+  const selected = messages[messages.length - 1];
+  state.audioMessageId = String(selected.message_id);
+  updateAudioPlayerViews();
+  void selectAudioMessage(selected, { autoplay: continuePlayback });
+}
+
+function audioMiniPlayerHtml() {
+  const messages = getAudioMessages();
+  if (!messages.length) return "";
+  const voiceAvailable = getAudioMessages("voice").length > 0;
+  const musicAvailable = getAudioMessages("music").length > 0;
+  if (!getAudioMessages(state.audioKind).length) state.audioKind = musicAvailable ? "music" : "voice";
+  const selected = getSelectedAudioMessage();
+  const duration = Number(selected?.duration) || 0;
+  return `
+    <div class="audio-mini-bar" data-audio-mini>
+      <div class="audio-mini-switch" role="tablist" aria-label="Тип аудио">
+        ${voiceAvailable ? `<button type="button" data-audio-kind="voice" class="${state.audioKind === "voice" ? "active" : ""}" aria-pressed="${state.audioKind === "voice"}">ГС</button>` : ""}
+        ${musicAvailable ? `<button type="button" data-audio-kind="music" class="${state.audioKind === "music" ? "active" : ""}" aria-pressed="${state.audioKind === "music"}">Музыка</button>` : ""}
+      </div>
+      <button type="button" class="audio-mini-open" data-audio-open aria-label="Открыть плеер">
+        <span class="audio-mini-note" aria-hidden="true">♫</span>
+        <span class="audio-mini-track">
+          <strong data-audio-mini-title>${escapeHtml(selected ? audioMessageTitle(selected) : "Аудио в чате")}</strong>
+          <small data-audio-mini-performer>${escapeHtml(selected ? audioMessagePerformer(selected) : "")}</small>
+          <span class="audio-mini-progress" aria-hidden="true"><span></span></span>
+        </span>
+        <span class="audio-mini-time"><span data-audio-mini-current>0:00</span><span> / </span><span data-audio-mini-duration>${formatPlaybackTime(duration)}</span></span>
+      </button>
+      <button type="button" class="audio-mini-toggle" data-audio-toggle aria-label="Воспроизвести" title="Воспроизвести">${VOICE_PLAY_ICON}</button>
+    </div>
+  `;
+}
+
+function openAudioPlayer(root, message = getSelectedAudioMessage()) {
+  if (!message) return;
+  const kind = normalizeAudioKind(message);
+  if (!kind) return;
+  closeAudioPlayer();
+  state.audioKind = kind;
+  state.audioMessageId = String(message.message_id);
+  const tracks = getAudioMessages(kind).slice(-40).reverse();
+  const overlay = document.createElement("div");
+  overlay.className = "audio-player-overlay";
+  overlay.innerHTML = `
+    <section class="audio-player-dialog" role="dialog" aria-modal="true" aria-label="Аудиоплеер">
+      <div class="audio-player-grabber" aria-hidden="true"></div>
+      <header class="audio-player-header">
+        <span>${kind === "voice" ? "ГОЛОСОВЫЕ" : "МУЗЫКА"}</span>
+        <button type="button" data-audio-close aria-label="Закрыть плеер">×</button>
+      </header>
+      <div class="audio-player-art" aria-hidden="true">${kind === "voice" ? "◖)))" : "♫"}</div>
+      <h2 data-audio-full-title>${escapeHtml(audioMessageTitle(message))}</h2>
+      <p data-audio-full-performer>${escapeHtml(audioMessagePerformer(message) || (kind === "voice" ? "Голосовое" : "Исполнитель не указан"))}</p>
+      <div class="audio-full-seek-wrap">
+        <input type="range" data-audio-full-seek min="0" max="${Math.max(1, Math.floor((Number(message.duration) || 0) * 10))}" value="0" step="1" aria-label="Перемотка" />
+        <div class="audio-full-times"><span data-audio-full-current>0:00</span><span data-audio-full-duration>${formatPlaybackTime(Number(message.duration) || 0)}</span></div>
+      </div>
+      <div class="audio-full-controls">
+        <button type="button" data-audio-previous aria-label="Предыдущий трек">|◀</button>
+        <button type="button" class="audio-full-toggle" data-audio-full-toggle aria-label="Воспроизвести">${VOICE_PLAY_ICON}</button>
+        <button type="button" data-audio-next aria-label="Следующий трек">▶|</button>
+      </div>
+      <div class="audio-player-queue-title">${kind === "voice" ? "Голосовые в чате" : "Музыка в чате"}</div>
+      <div class="audio-player-queue">
+        ${tracks.map((track) => `
+          <button type="button" class="audio-player-track ${String(track.message_id) === String(message.message_id) ? "active" : ""}" data-audio-track-id="${escapeHtml(String(track.message_id))}">
+            <span class="audio-player-track-icon" aria-hidden="true">${kind === "voice" ? "◖" : "♫"}</span>
+            <span class="audio-player-track-copy"><strong>${escapeHtml(audioMessageTitle(track))}</strong><small>${escapeHtml(audioMessagePerformer(track) || "—")}</small></span>
+            <span class="audio-player-track-duration">${formatPlaybackTime(Number(track.duration) || 0)}</span>
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+  audioPlayerOverlay = overlay;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay || event.target.closest("[data-audio-close]")) closeAudioPlayer();
+  });
+  overlay.querySelector("[data-audio-full-toggle]")?.addEventListener("click", () => toggleAudioMessage(getSelectedAudioMessage()));
+  overlay.querySelector("[data-audio-previous]")?.addEventListener("click", () => stepAudioTrack(-1));
+  overlay.querySelector("[data-audio-next]")?.addEventListener("click", () => stepAudioTrack(1));
+  overlay.querySelector("[data-audio-full-seek]")?.addEventListener("input", (event) => {
+    const audio = ensureChatAudioElement();
+    if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      audio.currentTime = Number(event.currentTarget.value) / 10;
+      updateAudioPlayerViews();
+    }
+  });
+  overlay.querySelectorAll("[data-audio-track-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const next = tracks.find((item) => String(item.message_id) === button.dataset.audioTrackId);
+      if (next) {
+        state.audioMessageId = String(next.message_id);
+        updateAudioPlayerViews();
+        void selectAudioMessage(next, { autoplay: true });
+      }
+    });
+  });
+  overlay.escapeHandler = (event) => {
+    if (event.key === "Escape") closeAudioPlayer();
+  };
+  document.addEventListener("keydown", overlay.escapeHandler);
+  void selectAudioMessage(message);
+}
+
+function closeAudioPlayer() {
+  if (!audioPlayerOverlay) return;
+  if (audioPlayerOverlay.escapeHandler) document.removeEventListener("keydown", audioPlayerOverlay.escapeHandler);
+  audioPlayerOverlay.remove();
+  audioPlayerOverlay = null;
+}
+
+function stepAudioTrack(direction) {
+  const tracks = getAudioMessages(state.audioKind);
+  if (tracks.length < 2) return;
+  const index = tracks.findIndex((message) => String(message.message_id) === String(state.audioMessageId));
+  const nextIndex = (index + direction + tracks.length) % tracks.length;
+  void selectAudioMessage(tracks[nextIndex], { autoplay: true });
+}
+
+function renderVoiceMessagePlayer(container, media) {
+  const message = state.messages.find((item) => String(item.message_id) === container.dataset.messageId);
+  if (!message) return;
+  const player = document.createElement("div");
+  player.className = "voice-player chat-audio-message-player";
+  player.dataset.audioMessagePlayer = "true";
+  player.dataset.audioMessageId = String(message.message_id);
+  player.dataset.audioDuration = String(Number(message.duration) || 0);
+
+  const playButton = document.createElement("button");
+  playButton.className = "voice-player-button";
+  playButton.type = "button";
+  playButton.dataset.audioPlay = "true";
+  playButton.setAttribute("aria-label", "Прослушать голосовое сообщение");
+  playButton.title = "Прослушать";
+  playButton.innerHTML = VOICE_PLAY_ICON;
+  playButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAudioMessage(message);
+  });
+
+  const main = document.createElement("div");
+  main.className = "voice-player-main";
+  const waveform = document.createElement("div");
+  waveform.className = "voice-waveform";
+  waveform.tabIndex = 0;
+  waveform.setAttribute("role", "slider");
+  waveform.setAttribute("aria-label", "Позиция голосового сообщения");
+  waveform.setAttribute("aria-valuemin", "0");
+  waveform.setAttribute("aria-valuemax", "100");
+  waveform.setAttribute("aria-valuenow", "0");
+
+  const times = document.createElement("div");
+  times.className = "voice-player-times";
+  const currentTime = document.createElement("span");
+  currentTime.dataset.audioCurrent = "true";
+  currentTime.textContent = "0:00";
+  const duration = document.createElement("span");
+  duration.dataset.audioDuration = "true";
+  duration.textContent = formatPlaybackTime(Number(message.duration) || 0);
+  times.append(currentTime, duration);
+  main.append(waveform, times);
+  player.append(playButton, main);
+  container.replaceChildren(player);
+
+  const seekTo = (ratio) => {
+    seekAudioMessage(message, ratio);
+  };
+  waveform.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const bounds = waveform.getBoundingClientRect();
+    if (bounds.width > 0) seekTo((event.clientX - bounds.left) / bounds.width);
+  });
+  waveform.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      seekAudioMessage(message, (audio) => (audio.currentTime + (event.key === "ArrowRight" ? 3 : -3)) / audio.duration);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      seekTo(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      seekTo(1);
+    }
+  });
+
+  const placeholderHeights = Array(VOICE_WAVEFORM_BAR_COUNT).fill(6);
+  waveform.replaceChildren(...placeholderHeights.map((height) => {
+    const bar = document.createElement("span");
+    bar.className = "voice-wave-bar";
+    bar.dataset.voiceWaveBar = "true";
+    bar.style.setProperty("--bar-height", `${height}px`);
+    return bar;
+  }));
+  void getVoiceWaveform(container.dataset.mediaPath, media.blob).then((heights) => {
+    if (!player.isConnected) return;
+    waveform.replaceChildren(...(heights || placeholderHeights).map((height) => {
+      const bar = document.createElement("span");
+      bar.className = "voice-wave-bar";
+      bar.dataset.voiceWaveBar = "true";
+      bar.style.setProperty("--bar-height", `${height}px`);
+      return bar;
+    }));
+    updateAudioPlayerViews();
+  });
+}
+
+function renderMusicMessagePlayer(container) {
+  const message = state.messages.find((item) => String(item.message_id) === container.dataset.messageId);
+  if (!message) return;
+  const player = document.createElement("div");
+  player.className = "music-player chat-audio-message-player";
+  player.dataset.audioMessagePlayer = "true";
+  player.dataset.audioMessageId = String(message.message_id);
+  player.dataset.audioDuration = String(Number(message.duration) || 0);
+
+  const playButton = document.createElement("button");
+  playButton.className = "music-player-button";
+  playButton.type = "button";
+  playButton.dataset.audioPlay = "true";
+  playButton.innerHTML = VOICE_PLAY_ICON;
+  playButton.setAttribute("aria-label", "Воспроизвести музыку");
+  playButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleAudioMessage(message);
+  });
+
+  const details = document.createElement("button");
+  details.className = "music-player-details";
+  details.type = "button";
+  details.setAttribute("aria-label", `Открыть плеер: ${audioMessageTitle(message)}`);
+  details.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openAudioPlayer(null, message);
+  });
+  const title = document.createElement("strong");
+  title.textContent = audioMessageTitle(message);
+  const performer = document.createElement("small");
+  performer.textContent = audioMessagePerformer(message) || "Музыка";
+  const progress = document.createElement("span");
+  progress.className = "music-player-progress";
+  progress.setAttribute("aria-hidden", "true");
+  progress.append(document.createElement("span"));
+  const time = document.createElement("span");
+  time.className = "music-player-time";
+  time.dataset.audioDuration = "true";
+  time.textContent = formatPlaybackTime(Number(message.duration) || 0);
+  details.append(title, performer, progress, time);
+  player.append(playButton, details);
+  container.replaceChildren(player);
+  updateAudioPlayerViews();
 }
 
 function loadMessageMedia(container) {
@@ -661,13 +1250,7 @@ function loadMessageMedia(container) {
   if (!path) return;
   container.dataset.mediaRequested = "true";
 
-  let cached = messageMediaCache.get(path);
-  if (!cached) {
-    cached = { promise: api.fetchMessageMedia(path) };
-    messageMediaCache.set(path, cached);
-  }
-
-  cached.promise.then((media) => {
+  getMessageMedia(path).then((media) => {
     if (!container.isConnected) return;
     if (!media?.url) {
       container.innerHTML = container.dataset.mediaKind === "sticker"
@@ -677,13 +1260,23 @@ function loadMessageMedia(container) {
       return;
     }
 
-    if (media.contentType.startsWith("audio/") || ["voice", "audio"].includes(container.dataset.mediaKind)) {
+    if (container.dataset.mediaKind === "voice") {
+      renderVoiceMessagePlayer(container, media);
+      return;
+    }
+
+    if (["music", "audio"].includes(container.dataset.mediaKind)) {
+      renderMusicMessagePlayer(container);
+      return;
+    }
+
+    if (media.contentType.startsWith("audio/")) {
       const audio = document.createElement("audio");
       audio.className = "chat-media-audio";
       audio.controls = true;
       audio.preload = "none";
       audio.src = media.url;
-      audio.setAttribute("aria-label", container.dataset.mediaKind === "voice" ? "Голосовое сообщение" : "Аудиосообщение");
+      audio.setAttribute("aria-label", "Аудиосообщение");
       container.replaceChildren(audio);
       return;
     }
@@ -811,8 +1404,9 @@ function chatMessageMediaHtml(message) {
   const type = String(message.type || "").toLowerCase();
   if (!message.has_media) return "";
   const messageId = String(message.message_id ?? "");
+  const isMusicDocument = type === "document" && /\.(mp3|m4a|aac|flac|wav|ogg|opus|oga)$/i.test(String(message.file_name || ""));
 
-  if (type === "document") {
+  if (type === "document" && !isMusicDocument) {
     const filename = String(message.file_name || "Документ");
     const extension = filename.includes(".") ? filename.split(".").pop().slice(0, 5).toUpperCase() : "FILE";
     const size = formatFileSize(message.file_size);
@@ -831,8 +1425,12 @@ function chatMessageMediaHtml(message) {
     `;
   }
 
-  if (type === "voice" || type === "audio") {
-    return `<div class="chat-message-media audio" data-media-path="/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(messageId)}/media" data-media-kind="${escapeHtml(type)}" aria-label="${type === "voice" ? "Голосовое сообщение" : "Аудиосообщение"}"><span class="chat-media-loading">${type === "voice" ? "Загрузка голосового…" : "Загрузка аудио…"}</span></div>`;
+  if (["voice", "music", "audio"].includes(type) || isMusicDocument) {
+    const voice = type === "voice";
+    const kind = voice ? "voice" : "music";
+    const label = voice ? "Голосовое сообщение" : "Музыка";
+    const loading = voice ? "Готовлю волну…" : "Загружаю плеер…";
+    return `<div class="chat-message-media ${kind}" data-media-path="/api/chats/${encodeURIComponent(state.selectedId)}/messages/${encodeURIComponent(messageId)}/media" data-media-kind="${kind}" data-message-id="${escapeHtml(messageId)}" aria-label="${label}"><span class="chat-media-loading">${loading}</span></div>`;
   }
 
   if (!["photo", "sticker", "animation", "gif"].includes(type)) return "";
@@ -1053,6 +1651,7 @@ function chatTabHtml() {
 
   return `
     <section class="group-chat" aria-label="Переписка группы">
+      ${audioMiniPlayerHtml()}
       <div class="chat-history" id="chat-history" aria-live="polite">${content}</div>
       <button type="button" class="chat-jump-bottom" data-jump-bottom aria-label="Перейти к последним сообщениям" title="Последние сообщения" hidden>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15m0 0 6-6m-6 6-6-6"/></svg>
@@ -1801,6 +2400,23 @@ async function applyMuteDuration(root, message, durationSeconds, label, trigger)
   }
 }
 
+function bindAudioMiniPlayer(root) {
+  root.querySelector("[data-audio-mini]")?.addEventListener("click", (event) => {
+    if (event.target.closest?.("[data-audio-kind], [data-audio-toggle], [data-audio-open]")) return;
+    openAudioPlayer(root);
+  });
+  root.querySelectorAll("[data-audio-kind]").forEach((button) => {
+    button.addEventListener("click", () => switchAudioKind(button.dataset.audioKind));
+  });
+  root.querySelector("[data-audio-toggle]")?.addEventListener("click", () => {
+    toggleAudioMessage(getSelectedAudioMessage());
+  });
+  root.querySelector("[data-audio-open]")?.addEventListener("click", () => {
+    openAudioPlayer(root);
+  });
+  updateAudioPlayerViews();
+}
+
 function bindMessageGestures(root) {
   root.querySelectorAll(".chat-message").forEach((article) => {
     const message = state.messages.find(
@@ -1856,6 +2472,10 @@ function bindMessageGestures(root) {
       event.preventDefault();
       if (longPressTriggered) {
         longPressTriggered = false;
+        return;
+      }
+      if (event.target.closest?.(".music-player, .chat-message-media.music")) {
+        openAudioPlayer(root, message);
         return;
       }
       showMessageActionMenu(root, message, event.clientX, event.clientY);
@@ -2134,6 +2754,7 @@ async function jumpToReplyTarget(root, messageId, trigger) {
 
 function bindEvents(root) {
   bindMessageGestures(root);
+  bindAudioMiniPlayer(root);
 
   const chatHistory = root.querySelector("#chat-history");
   chatHistory?.addEventListener("scroll", () => updateJumpToBottomButton(root), { passive: true });

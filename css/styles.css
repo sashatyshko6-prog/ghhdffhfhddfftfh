@@ -261,6 +261,77 @@ input, select, textarea { font-family: inherit; }
 .chat-media-video { display: block; width: auto; max-width: min(100%, 440px); max-height: 360px; border-radius: 8px; background: #101820; object-fit: contain; }
 .chat-media-audio { display: block; width: min(100%, 360px); min-height: 40px; margin-top: 4px; }
 .chat-message-media.audio { min-height: 44px; }
+.chat-message-media.voice { width: min(100%, 380px); min-width: min(100%, 280px); min-height: 64px; overflow: hidden; border: 1px solid rgba(82,197,199,.13); border-radius: 18px; background: linear-gradient(135deg, #1b3038, #1a2933); }
+.chat-message.outgoing .chat-message-media.voice { border-color: rgba(255,255,255,.1); background: linear-gradient(135deg, #24434a, #203842); }
+.voice-player { display: flex; width: 100%; min-width: 0; min-height: 62px; align-items: center; gap: 11px; padding: 8px 12px; }
+.voice-player-button { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: var(--accent); color: #10252b; box-shadow: 0 2px 9px rgba(0,0,0,.2); transition: transform .15s ease, background .15s ease; }
+.voice-player-button:hover { transform: scale(1.05); background: var(--accent-hover); }
+.voice-player-button svg { width: 19px; height: 19px; fill: currentColor; }
+.voice-player-main { min-width: 0; flex: 1; }
+.voice-waveform { display: flex; width: 100%; height: 36px; align-items: center; justify-content: space-between; gap: 2px; overflow: hidden; outline: 0; cursor: pointer; touch-action: manipulation; }
+.voice-waveform:focus-visible { border-radius: 6px; outline: 2px solid rgba(82,197,199,.62); outline-offset: 2px; }
+.voice-wave-bar { display: block; width: 3px; min-width: 2px; max-width: 4px; height: var(--bar-height, 6px); flex: 1 1 0; border-radius: 4px; background: #738b95; opacity: .82; transition: height .22s ease, background .12s ease, opacity .12s ease; }
+.voice-wave-bar.is-played { background: var(--accent); opacity: 1; }
+.voice-player-times { display: flex; justify-content: space-between; margin-top: 1px; color: #91a8b2; font-size: 10px; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.voice-player.is-playing .voice-player-button { background: #8fe0dc; }
+.voice-player.has-playback-error .voice-player-duration { color: #ff9c9c; }
+.voice-player-audio { display: none; }
+.chat-audio-engine { display: none; }
+.audio-mini-bar { display: flex; min-height: 54px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid rgba(255,255,255,.06); background: #16232e; }
+.audio-mini-switch { display: flex; flex: 0 0 auto; gap: 2px; padding: 3px; border-radius: 18px; background: #202f3b; }
+.audio-mini-switch button { min-height: 28px; padding: 0 8px; border: 0; border-radius: 15px; background: transparent; color: #9aabb6; font-size: 10px; white-space: nowrap; }
+.audio-mini-switch button.active { background: #344b59; color: #d9f3f2; }
+.audio-mini-open { display: flex; min-width: 0; min-height: 40px; flex: 1; align-items: center; gap: 8px; padding: 3px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; }
+.audio-mini-open:hover { background: rgba(255,255,255,.035); }
+.audio-mini-note { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border-radius: 50%; background: #304b5b; color: #80c7f4; font-size: 17px; }
+.audio-mini-track { display: grid; min-width: 0; flex: 1; grid-template-columns: minmax(0,1fr); gap: 2px; }
+.audio-mini-track strong { overflow: hidden; color: #edf4f8; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.audio-mini-track small { overflow: hidden; color: #94a4af; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.audio-mini-progress { display: block; height: 2px; overflow: hidden; border-radius: 2px; background: rgba(210,225,232,.22); }
+.audio-mini-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: #5faee4; transition: width .15s linear; }
+.audio-mini-time { flex: 0 0 auto; color: #899aa5; font-size: 9px; font-variant-numeric: tabular-nums; }
+.audio-mini-toggle { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: #3d8fc3; color: white; }
+.audio-mini-toggle svg { width: 15px; height: 15px; fill: currentColor; }
+.audio-mini-toggle:hover { background: #58a8dd; }
+.chat-message-media.music { width: min(100%, 380px); min-width: min(100%, 260px); min-height: 64px; overflow: hidden; border: 1px solid rgba(109,177,221,.14); border-radius: 17px; background: linear-gradient(135deg, #1e3442, #1a2933); }
+.chat-message.outgoing .chat-message-media.music { border-color: rgba(255,255,255,.1); background: linear-gradient(135deg, #233b4d, #20343e); }
+.music-player { display: flex; width: 100%; min-width: 0; min-height: 62px; align-items: center; gap: 10px; padding: 8px 11px; }
+.music-player-button { display: grid; width: 40px; height: 40px; flex: 0 0 40px; place-items: center; padding: 0; border: 0; border-radius: 50%; background: #5faee4; color: #fff; box-shadow: 0 2px 9px rgba(0,0,0,.2); }
+.music-player-button:hover { background: #7ac2ef; }
+.music-player-button svg { width: 19px; height: 19px; fill: currentColor; }
+.music-player-details { display: grid; min-width: 0; min-height: 40px; flex: 1; grid-template-columns: minmax(0,1fr) auto; grid-template-rows: auto auto 3px; align-items: center; gap: 2px 7px; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.music-player-details:focus-visible { border-radius: 5px; outline: 2px solid rgba(95,174,228,.68); outline-offset: 2px; }
+.music-player-details strong { overflow: hidden; grid-column: 1 / -1; color: #edf4f8; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.music-player-details small { overflow: hidden; color: #9baeb9; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.music-player-time { color: #91a1aa; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.music-player-progress { display: block; height: 3px; overflow: hidden; grid-column: 1 / -1; border-radius: 3px; background: rgba(207,225,235,.2); }
+.music-player-progress > span { display: block; width: 0; height: 100%; border-radius: inherit; background: #5faee4; transition: width .15s linear; }
+.music-player.is-playing .music-player-button { background: #318fc7; }
+.audio-player-overlay { position: fixed; inset: 0; z-index: 1600; display: flex; align-items: flex-end; justify-content: center; padding-top: env(safe-area-inset-top); background: rgba(4,10,15,.68); backdrop-filter: blur(8px); }
+.audio-player-dialog { display: flex; width: min(100%, 520px); max-height: min(92%, 860px); flex-direction: column; overflow: hidden; padding: 8px 20px max(18px, env(safe-area-inset-bottom)); border: 1px solid rgba(255,255,255,.08); border-bottom: 0; border-radius: 23px 23px 0 0; background: linear-gradient(160deg, #263746, #17232f 55%); box-shadow: 0 -14px 60px rgba(0,0,0,.4); color: var(--text); }
+.audio-player-grabber { width: 37px; height: 4px; flex: 0 0 4px; align-self: center; margin: 2px 0 13px; border-radius: 4px; background: #748390; }
+.audio-player-header { display: flex; align-items: center; justify-content: space-between; color: #a6b8c4; font-size: 10px; font-weight: 700; letter-spacing: .12em; }
+.audio-player-header button { width: 32px; height: 32px; border: 0; border-radius: 50%; background: rgba(255,255,255,.07); color: #c5d0d8; font-size: 23px; line-height: 1; }
+.audio-player-art { display: grid; width: 118px; height: 118px; flex: 0 0 118px; place-items: center; align-self: center; margin: 14px 0 12px; border: 1px solid rgba(255,255,255,.08); border-radius: 18px; background: radial-gradient(circle at 30% 25%, #4e93bc, #27516a 53%, #1a3343); box-shadow: 0 10px 30px rgba(0,0,0,.25); color: #d6efff; font-size: 43px; }
+.audio-player-dialog h2 { overflow: hidden; margin: 0; color: #f0f5f8; font-size: 17px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.audio-player-dialog > p { overflow: hidden; margin: 4px 0 14px; color: #9eacb7; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.audio-full-seek-wrap input { display: block; width: 100%; height: 22px; margin: 0; accent-color: #62b6ec; cursor: pointer; }
+.audio-full-times { display: flex; justify-content: space-between; color: #8998a5; font-size: 10px; font-variant-numeric: tabular-nums; }
+.audio-full-controls { display: flex; align-items: center; justify-content: center; gap: 38px; margin: 13px 0 16px; }
+.audio-full-controls button { display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 0; background: transparent; color: #c6d2db; font-size: 19px; }
+.audio-full-controls .audio-full-toggle { width: 54px; height: 54px; border-radius: 50%; background: #e6eff5; color: #1a2a35; }
+.audio-full-toggle svg { width: 22px; height: 22px; fill: currentColor; }
+.audio-player-queue-title { flex: 0 0 auto; margin: 0 0 6px; color: #b8c6ce; font-size: 11px; font-weight: 650; }
+.audio-player-queue { min-height: 0; overflow-y: auto; border-top: 1px solid rgba(255,255,255,.07); overscroll-behavior: contain; }
+.audio-player-track { display: flex; width: 100%; min-height: 54px; align-items: center; gap: 10px; padding: 6px 3px; border: 0; border-bottom: 1px solid rgba(255,255,255,.055); background: transparent; color: inherit; text-align: left; }
+.audio-player-track:hover, .audio-player-track.active { background: rgba(255,255,255,.045); }
+.audio-player-track.active .audio-player-track-icon { color: #72bfee; }
+.audio-player-track-icon { width: 24px; flex: 0 0 24px; color: #9aabb5; text-align: center; }
+.audio-player-track-copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.audio-player-track-copy strong, .audio-player-track-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audio-player-track-copy strong { color: #e7eef2; font-size: 11px; font-weight: 550; }
+.audio-player-track-copy small { color: #92a1ac; font-size: 10px; }
+.audio-player-track-duration { color: #8796a0; font-size: 10px; font-variant-numeric: tabular-nums; }
 .chat-message-media.sticker { width: 176px; min-width: 0; height: 176px; min-height: 0; margin-top: 2px; background: transparent; }
 .chat-media-sticker { display: block; width: 100%; height: 100%; object-fit: contain; }
 .chat-media-loading, .chat-media-unavailable { padding: 12px; color: var(--text-muted); font-size: 11px; }
@@ -356,6 +427,12 @@ input, select, textarea { font-family: inherit; }
 @media (max-width: 520px) {
   .modal-backdrop { place-items: end center; padding: 12px 12px max(12px, env(safe-area-inset-bottom)); }
   .message-action-dialog { width: 100%; border-radius: 17px 17px 12px 12px; }
+  .audio-mini-bar { gap: 5px; padding-right: 7px; padding-left: 7px; }
+  .audio-mini-switch button { padding: 0 6px; font-size: 9px; }
+  .audio-mini-time { display: none; }
+  .audio-mini-note { width: 25px; height: 25px; flex-basis: 25px; }
+  .audio-mini-open { gap: 6px; }
+  .audio-player-art { width: 102px; height: 102px; flex-basis: 102px; }
 }
 @media (min-width: 768px) {
   .chat-screen .main { padding: 0 0 8px; }

@@ -146,7 +146,12 @@ async function fetchProtectedBlob(path) {
 async function fetchMessageMedia(path) {
   const { blob, contentType } = await fetchProtectedBlob(path);
   if (!blob.size) return null;
-  return { url: URL.createObjectURL(blob), contentType: contentType.split(";")[0].trim().toLowerCase() };
+  const normalizedContentType = contentType.split(";")[0].trim().toLowerCase();
+  return {
+    url: URL.createObjectURL(blob),
+    contentType: normalizedContentType,
+    blob: normalizedContentType.startsWith("audio/") ? blob : null,
+  };
 }
 
 export const api = {
