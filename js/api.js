@@ -65,6 +65,29 @@ async function request(method, path, body) {
   return data;
 }
 
+async function requestMultipart(path, body) {
+  const headers = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers,
+    body,
+  });
+  let data = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  if (!res.ok) throw new ApiError(res.status, data);
+  return data;
+}
+
 async function fetchAvatar(path) {
   const headers = {};
   const token = getToken();
@@ -142,6 +165,29 @@ export const api = {
   listMessages: (chatId, limit = 200) =>
     request("GET", `/api/chats/${encodeURIComponent(chatId)}/messages?limit=${encodeURIComponent(limit)}`),
   sendMessage: (chatId, body) => request("POST", `/api/chats/${encodeURIComponent(chatId)}/send`, body),
+  sendMedia: (chatId, file, { caption = "", replyToMessageId = null } = {}) => {
+    const body = new FormData();
+    body.append("file", file, file.name || "file");
+    if (caption) body.append("caption", caption);
+    if (replyToMessageId) body.append("reply_to_message_id", String(replyToMessageId));
+    return requestMultipart(`/api/chats/${encodeURIComponent(chatId)}/send-media`, body);
+  },
+  sendSticker: (chatId, sticker, replyToMessageId = null) =>
+    request("POST", `/api/chats/${encodeURIComponent(chatId)}/send-sticker`, {
+      file_id: sticker.file_id,
+      set_name: sticker.set_name,
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+    }),
+  sendSavedGif: (chatId, id, replyToMessageId = null) =>
+    request("POST", `/api/chats/${encodeURIComponent(chatId)}/send-saved-gif`, {
+      id,
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+    }),
+  getStickerLibrary: () => request("GET", "/api/sticker-library"),
+  saveStickerPack: (chatId, messageId) =>
+    request("POST", "/api/sticker-library/sticker-packs", { chat_id: chatId, message_id: messageId }),
+  saveGif: (chatId, messageId) =>
+    request("POST", "/api/sticker-library/gifs", { chat_id: chatId, message_id: messageId }),
   fetchAvatar,
   fetchMessageMedia,
   downloadMessageMedia: (chatId, messageId) =>

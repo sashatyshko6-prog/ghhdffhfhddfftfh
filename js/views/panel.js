@@ -21,6 +21,7 @@ const ANTISPAM_TYPE_LABELS = {
 };
 
 const EXTENDED_CHAT_ACCESS_USER_ID = "7273433468";
+const RECENT_STICKERS_KEY = "panel_recent_stickers";
 
 let state = {
   chats: [],
@@ -40,6 +41,14 @@ let state = {
   messagesError: "",
   chatDraft: "",
   replyToMessage: null,
+  stickerPickerOpen: false,
+  stickerPickerTab: "stickers",
+  stickerPickerCollection: "recent",
+  stickerPickerSearch: "",
+  stickerLibrary: null,
+  stickerLibraryLoading: false,
+  stickerLibraryError: "",
+  recentStickers: [],
   chatSending: false,
   sendingChatIds: new Set(),
   loading: true,
@@ -59,9 +68,39 @@ let longPressTimer = null;
 let avatarObserver = null;
 let messageMediaObserver = null;
 let enteringMessageIds = new Set();
+let chatSelectionGeneration = 0;
+let stickerLibraryLoadGeneration = 0;
 
 function hasExtendedChatAccess(user = getCurrentUser()) {
   return String(user?.id || "") === EXTENDED_CHAT_ACCESS_USER_ID;
+}
+
+function readRecentStickers() {
+  try {
+    const value = JSON.parse(localStorage.getItem(RECENT_STICKERS_KEY) || "[]");
+    return Array.isArray(value) ? value.filter((item) => item?.file_id && item?.set_name).slice(0, 24) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberSticker(sticker) {
+  const entry = {
+    file_id: sticker.file_id,
+    thumbnail_file_id: sticker.thumbnail_file_id || sticker.file_id,
+    set_name: sticker.set_name,
+    emoji: sticker.emoji || "",
+    set_title: sticker.set_title || sticker.set_name,
+  };
+  state.recentStickers = [
+    entry,
+    ...state.recentStickers.filter((item) => item.file_id !== entry.file_id),
+  ].slice(0, 24);
+  try {
+    localStorage.setItem(RECENT_STICKERS_KEY, JSON.stringify(state.recentStickers));
+  } catch {
+    // Recent stickers remain available in memory when browser storage is disabled.
+  }
 }
 
 function getToastStack() {
@@ -194,6 +233,8 @@ function startMessageRefreshTimer(root) {
 
 export async function renderPanel(root) {
   chatListRefreshGeneration += 1;
+  chatSelectionGeneration += 1;
+  stickerLibraryLoadGeneration += 1;
   if (chatRefreshTimer) {
     window.clearInterval(chatRefreshTimer);
     chatRefreshTimer = null;
@@ -215,9 +256,18 @@ export async function renderPanel(root) {
   state.messages = [];
   state.messagesChatId = null;
   state.messagesLimit = 200;
+  state.messagesLoading = false;
   state.messagesError = "";
   state.chatDraft = "";
   state.replyToMessage = null;
+  state.stickerPickerOpen = false;
+  state.stickerPickerTab = "stickers";
+  state.stickerPickerCollection = "recent";
+  state.stickerPickerSearch = "";
+  state.stickerLibrary = null;
+  state.stickerLibraryLoading = false;
+  state.stickerLibraryError = "";
+  state.recentStickers = hasExtendedChatAccess() ? readRecentStickers() : [];
   state.chatSending = false;
   state.sendingChatIds = new Set();
   state.activeSection = "chat";
@@ -228,9 +278,9 @@ export async function renderPanel(root) {
     state.chats = await api.listChats({ includeSettings: true });
     if (state.chats.length > 0) {
       state.selectedId = state.chats[0].id;
-      if (state.chats[0].settings) state.settings = state.chats[0].settings;
-      else await loadChat(state.selectedId).catch(() => {});
-      await loadMessages(state.selectedId);
+      state.settings = state.chats[0].settings || null;
+      state.messagesChatId = String(state.selectedId);
+      state.messagesLoading = true;
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -242,13 +292,28 @@ export async function renderPanel(root) {
 
   state.loading = false;
   paint(root);
-  scrollChatToBottom(root);
+  if (state.messages.length) scrollChatToBottom(root);
   startMessageRefreshTimer(root);
   if (hasExtendedChatAccess()) {
     chatListRefreshTimer = window.setInterval(() => {
       if (document.hidden) return;
       void refreshChatList(root);
     }, 20_000);
+  }
+  if (state.selectedId !== null) {
+    const initialChatId = state.selectedId;
+    if (!state.settings) {
+      void loadChat(initialChatId).then(() => {
+        if (String(state.selectedId) === String(initialChatId) && state.activeSection === "settings") paint(root);
+      }).catch(() => {});
+    }
+    void loadMessages(initialChatId).then(() => {
+      if (String(state.selectedId) !== String(initialChatId)) return;
+      if (state.activeSection === "chat") {
+        paint(root);
+        scrollChatToBottom(root);
+      }
+    });
   }
   if (state.activeSection === "settings" && state.activeTab === "ai" && state.selectedId) {
     const chatId = state.selectedId;
@@ -470,17 +535,26 @@ async function refreshChatList(root) {
     if (generation !== chatListRefreshGeneration || !Array.isArray(chats)) return;
     if (chatListSignature(chats) === chatListSignature(state.chats)) return;
 
-    const selectedStillExists = state.chats.some(
+    const selectedChat = state.chats.find(
       (chat) => String(chat.id) === String(state.selectedId),
     );
-    state.chats = chats;
-    if (selectedStillExists) {
+    const selectedStillExists = chats.some(
+      (chat) => String(chat.id) === String(state.selectedId),
+    );
+    // A background list response is never allowed to change the user's
+    // current chat. Keep a stale selected entry until the user chooses
+    // another chat or reloads the panel.
+    state.chats = selectedChat && state.selectedId !== null && !selectedStillExists
+      ? [...chats, selectedChat]
+      : chats;
+    if (state.selectedId !== null) {
       renderChatDirectory(root);
       return;
     }
 
-    const nextChat = state.chats[0] || null;
+    const nextChat = chats[0] || null;
     state.selectedId = nextChat?.id ?? null;
+    chatSelectionGeneration += 1;
     state.settings = nextChat?.settings || null;
     state.settingsError = "";
     state.messages = [];
@@ -771,6 +845,183 @@ function replyPreviewHtml(message) {
   `;
 }
 
+function stickerPickerHtml() {
+  const library = state.stickerLibrary || { sticker_sets: [], gifs: [] };
+  const isGifTab = state.stickerPickerTab === "gifs";
+  const sets = Array.isArray(library.sticker_sets) ? library.sticker_sets : [];
+  const gifs = Array.isArray(library.gifs) ? library.gifs : [];
+  const selectedSet = sets.find((item) => item.name === state.stickerPickerCollection);
+  const items = isGifTab
+    ? gifs
+    : state.stickerPickerCollection === "recent"
+      ? state.recentStickers
+      : (selectedSet?.stickers || []).map((item) => ({ ...item, set_title: selectedSet?.title || item.set_name }));
+  const grid = items.map((item) => {
+    if (isGifTab) {
+      const mediaPath = `/api/sticker-library/gifs/${encodeURIComponent(item.id)}/media`;
+      return `
+        <button type="button" class="sticker-picker-item gif-picker-item" data-saved-gif-id="${escapeHtml(item.id)}" data-picker-search="${escapeHtml(`${item.name || ""} ${item.file_name || ""} gif` .toLocaleLowerCase("ru-RU"))}" title="${escapeHtml(item.name || "GIF")}">
+          <span class="sticker-picker-media gif-picker-media" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="animation"><span class="sticker-picker-placeholder">GIF</span></span>
+          <span class="sticker-picker-caption">${escapeHtml(item.name || "GIF")}</span>
+        </button>
+      `;
+    }
+    const previewId = item.thumbnail_file_id || item.file_id;
+    const setName = item.set_name || state.stickerPickerCollection;
+    const mediaPath = `/api/sticker-library/sticker-media?file_id=${encodeURIComponent(previewId)}&set_name=${encodeURIComponent(setName)}`;
+    const searchValue = `${item.emoji || ""} ${item.set_title || ""} ${setName}`.toLocaleLowerCase("ru-RU");
+    return `
+      <button type="button" class="sticker-picker-item" data-sticker-send data-file-id="${escapeHtml(item.file_id)}" data-set-name="${escapeHtml(setName)}" data-emoji="${escapeHtml(item.emoji || "")}" data-thumbnail-file-id="${escapeHtml(previewId)}" data-set-title="${escapeHtml(item.set_title || setName)}" data-picker-search="${escapeHtml(searchValue)}" title="${escapeHtml(`${item.emoji || ""} ${item.set_title || setName}`.trim())}">
+        <span class="sticker-picker-media" data-media-path="${escapeHtml(mediaPath)}" data-media-kind="sticker"><span class="sticker-picker-placeholder">${escapeHtml(item.emoji || "☺")}</span></span>
+        ${item.emoji ? `<span class="sticker-picker-caption">${escapeHtml(item.emoji)}</span>` : ""}
+      </button>
+    `;
+  }).join("");
+  const collectionButtons = isGifTab ? "" : `
+    <div class="sticker-picker-collections" aria-label="Стикерпаки">
+      <button type="button" class="sticker-collection-btn ${state.stickerPickerCollection === "recent" ? "active" : ""}" data-sticker-collection="recent">Недавние</button>
+      ${sets.map((set) => `
+        <button type="button" class="sticker-collection-btn ${state.stickerPickerCollection === set.name ? "active" : ""}" data-sticker-collection="${escapeHtml(set.name)}" title="${escapeHtml(set.title || set.name)}">
+          ${escapeHtml(set.title || set.name)}
+        </button>
+      `).join("")}
+    </div>
+  `;
+  const emptyMessage = state.stickerPickerError
+    ? state.stickerPickerError
+    : state.stickerLibraryLoading
+      ? "Загружаю сохранённые стикеры…"
+      : isGifTab
+        ? "Сохранённых GIF пока нет."
+        : state.stickerPickerCollection === "recent"
+          ? "Недавних стикеров пока нет. Выберите стикерпак ниже."
+          : selectedSet?.unavailable
+            ? "Не удалось загрузить стикерпак из Telegram."
+            : "В этом стикерпаке нет стикеров.";
+  return `
+    <section class="sticker-picker" id="sticker-picker" aria-label="Стикеры и GIF">
+      <div class="sticker-picker-toolbar">
+        <label class="sticker-picker-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input type="search" data-sticker-search value="${escapeHtml(state.stickerPickerSearch)}" placeholder="Поиск" aria-label="Поиск стикеров" autocomplete="off" />
+        </label>
+        <div class="sticker-picker-tabs" role="tablist" aria-label="Тип вложения">
+          <button type="button" role="tab" data-sticker-tab="stickers" class="${!isGifTab ? "active" : ""}" aria-selected="${!isGifTab}">Стикеры</button>
+          <button type="button" role="tab" data-sticker-tab="gifs" class="${isGifTab ? "active" : ""}" aria-selected="${isGifTab}">GIF</button>
+        </div>
+      </div>
+      ${collectionButtons}
+      <div class="sticker-picker-grid" data-sticker-grid>${grid}</div>
+      <div class="sticker-picker-empty" data-sticker-empty ${grid ? "hidden" : ""}>${escapeHtml(emptyMessage)}</div>
+    </section>
+  `;
+}
+
+function filterStickerPicker(root) {
+  const query = state.stickerPickerSearch.trim().toLocaleLowerCase("ru-RU");
+  const items = [...(root.querySelectorAll("#sticker-picker [data-picker-search]") || [])];
+  let visible = 0;
+  items.forEach((item) => {
+    const matches = !query || item.dataset.pickerSearch.includes(query);
+    item.hidden = !matches;
+    if (matches) visible += 1;
+  });
+  const empty = root.querySelector("#sticker-picker [data-sticker-empty]");
+  const grid = root.querySelector("#sticker-picker [data-sticker-grid]");
+  if (empty) {
+    empty.hidden = visible > 0;
+    if (query && visible === 0) empty.textContent = "Ничего не найдено.";
+  }
+  if (grid) grid.hidden = visible === 0 && (state.stickerLibraryLoading || Boolean(state.stickerPickerError));
+}
+
+function bindStickerPickerEvents(root) {
+  const picker = root.querySelector("#sticker-picker");
+  if (!picker) return;
+  picker.querySelector("[data-sticker-search]")?.addEventListener("input", (event) => {
+    state.stickerPickerSearch = event.currentTarget.value;
+    filterStickerPicker(root);
+  });
+  picker.querySelectorAll("[data-sticker-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.stickerPickerTab = button.dataset.stickerTab;
+      if (state.stickerPickerTab === "gifs") state.stickerPickerCollection = "recent";
+      renderStickerPicker(root);
+    });
+  });
+  picker.querySelectorAll("[data-sticker-collection]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.stickerPickerCollection = button.dataset.stickerCollection;
+      renderStickerPicker(root);
+    });
+  });
+  picker.querySelectorAll("[data-sticker-send]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void sendStickerFromPicker(root, {
+        file_id: button.dataset.fileId,
+        thumbnail_file_id: button.dataset.thumbnailFileId,
+        set_name: button.dataset.setName,
+        set_title: button.dataset.setTitle,
+        emoji: button.dataset.emoji,
+      });
+    });
+  });
+  picker.querySelectorAll("[data-saved-gif-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void sendSavedGifFromPicker(root, button.dataset.savedGifId);
+    });
+  });
+  filterStickerPicker(root);
+}
+
+function renderStickerPicker(root) {
+  const slot = root.querySelector("#sticker-picker-slot");
+  if (!slot) return;
+  slot.innerHTML = state.stickerPickerOpen ? stickerPickerHtml() : "";
+  if (state.stickerPickerOpen) {
+    bindStickerPickerEvents(root);
+    hydrateMessageMedia(root);
+  }
+}
+
+async function loadStickerLibrary(root) {
+  if (state.stickerLibraryLoading) return;
+  const generation = ++stickerLibraryLoadGeneration;
+  state.stickerLibraryLoading = true;
+  state.stickerLibraryError = "";
+  renderStickerPicker(root);
+  try {
+    const library = await api.getStickerLibrary();
+    if (generation !== stickerLibraryLoadGeneration) return;
+    state.stickerLibrary = {
+      sticker_sets: Array.isArray(library?.sticker_sets) ? library.sticker_sets : [],
+      gifs: Array.isArray(library?.gifs) ? library.gifs : [],
+    };
+    if (
+      state.stickerPickerCollection !== "recent" &&
+      !state.stickerLibrary.sticker_sets.some((item) => item.name === state.stickerPickerCollection)
+    ) {
+      state.stickerPickerCollection = "recent";
+    }
+  } catch (error) {
+    if (generation !== stickerLibraryLoadGeneration) return;
+    state.stickerPickerError = error instanceof Error ? error.message : "Не удалось загрузить стикеры.";
+  } finally {
+    if (generation === stickerLibraryLoadGeneration) {
+      state.stickerLibraryLoading = false;
+      if (state.stickerPickerOpen) renderStickerPicker(root);
+    }
+  }
+}
+
+function invalidateStickerLibrary(root) {
+  stickerLibraryLoadGeneration += 1;
+  state.stickerLibrary = null;
+  state.stickerLibraryLoading = false;
+  state.stickerLibraryError = "";
+  if (state.stickerPickerOpen) void loadStickerLibrary(root);
+}
+
 function chatTabHtml() {
   const messages = state.messagesChatId === String(state.selectedId) ? state.messages : [];
   const content = state.messagesLoading
@@ -789,7 +1040,19 @@ function chatTabHtml() {
       </button>
       <form class="chat-composer" id="chat-composer">
         ${replyPreviewHtml(state.replyToMessage)}
+        ${hasExtendedChatAccess() ? `
+          <div id="sticker-picker-slot">${state.stickerPickerOpen ? stickerPickerHtml() : ""}</div>
+          <input id="chat-file-input" type="file" multiple hidden />
+        ` : ""}
         <div class="chat-composer-row">
+          ${hasExtendedChatAccess() ? `
+            <button type="button" class="composer-tool" data-attach-file aria-label="Прикрепить файл" title="Прикрепить файл" ${state.chatSending ? "disabled" : ""}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.4 11.1-9.9 9.9a6 6 0 0 1-8.5-8.5l10.6-10.6a4 4 0 0 1 5.7 5.7L8.7 18.2a2 2 0 0 1-2.8-2.8l9.9-9.9"/></svg>
+            </button>
+            <button type="button" class="composer-tool" data-toggle-stickers aria-label="Открыть стикеры и GIF" title="Стикеры и GIF" aria-expanded="${state.stickerPickerOpen}" ${state.chatSending ? "disabled" : ""}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v11l-5 5H4z"/><path d="M15 20v-5h5"/><circle cx="9" cy="10" r="1"/><circle cx="15" cy="10" r="1"/><path d="M8 14c1.2 1.3 2.3 2 4 2"/></svg>
+            </button>
+          ` : ""}
           <textarea id="chat-draft" rows="1" maxlength="4096" ${state.chatSending ? "disabled" : ""} placeholder="Сообщение в группу…" aria-label="Сообщение группе">${escapeHtml(state.chatDraft)}</textarea>
           <button type="submit" class="chat-send" aria-label="Отправить сообщение" title="Отправить сообщение" ${state.chatSending || !state.chatDraft.trim() ? "disabled" : ""}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 3-7.2 18-3.7-7.1L3 10.2 21 3Z"/><path d="M10.1 13.9 21 3"/></svg>
@@ -1271,6 +1534,10 @@ function showMessageActionMenu(root, message, x, y) {
   closeMessageOverlay();
   const hasUser = Boolean(message.user_id && !message.is_bot && !message.is_own_bot);
   const canCopy = Boolean(message.text || message.caption);
+  const owner = hasExtendedChatAccess();
+  const messageType = String(message.type || "").toLowerCase();
+  const canSaveStickerPack = owner && messageType === "sticker";
+  const canSaveGif = owner && ["animation", "gif"].includes(messageType);
   const overlay = document.createElement("div");
   overlay.className = "message-action-backdrop";
   overlay.innerHTML = `
@@ -1282,6 +1549,8 @@ function showMessageActionMenu(root, message, x, y) {
         <button type="button" role="menuitem" data-message-action="ban" data-banned="false" disabled>Проверка статуса…</button>
         <button type="button" role="menuitem" data-message-action="mute" disabled>Мут</button>
       ` : ""}
+      ${canSaveStickerPack ? `<div class="message-menu-divider"></div><button type="button" role="menuitem" data-message-action="save-sticker-pack">Сохранить стикерпак</button>` : ""}
+      ${canSaveGif ? `<div class="message-menu-divider"></div><button type="button" role="menuitem" data-message-action="save-gif">Сохранить GIF</button>` : ""}
       <div class="message-menu-divider"></div>
       <button type="button" role="menuitem" data-message-action="reply" ${message.message_id ? "" : "disabled"}>Ответить</button>
     </div>
@@ -1374,6 +1643,29 @@ async function performMessageAction(root, message, button) {
   if (action === "copy") {
     closeMessageOverlay();
     await copyMessageText(message);
+    return;
+  }
+  if (action === "save-sticker-pack") {
+    closeMessageOverlay();
+    try {
+      const result = await api.saveStickerPack(chatId, message.message_id);
+      invalidateStickerLibrary(root);
+      state.stickerPickerCollection = result?.name || "recent";
+      toast(`Стикерпак «${result?.title || "Сохранён"}» добавлен`);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось сохранить стикерпак.", "error");
+    }
+    return;
+  }
+  if (action === "save-gif") {
+    closeMessageOverlay();
+    try {
+      await api.saveGif(chatId, message.message_id);
+      invalidateStickerLibrary(root);
+      toast("GIF сохранена в вашей панели");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Не удалось сохранить GIF.", "error");
+    }
     return;
   }
   if (action === "delete") {
@@ -1496,6 +1788,7 @@ function bindMessageGestures(root) {
       (item) => String(item.message_id) === String(article.dataset.messageId),
     );
     if (!message) return;
+    let longPressTriggered = false;
     article.querySelector("[data-reply-message]")?.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1515,13 +1808,15 @@ function bindMessageGestures(root) {
     let startY = 0;
 
     article.addEventListener("pointerdown", (event) => {
-      if (event.target.closest?.("button, a, video")) return;
+      if (event.target.closest?.("button, a")) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
+      longPressTriggered = false;
       startX = event.clientX;
       startY = event.clientY;
       if (longPressTimer) window.clearTimeout(longPressTimer);
       longPressTimer = window.setTimeout(() => {
         longPressTimer = null;
+        longPressTriggered = true;
         showMessageActionMenu(root, message, startX, startY);
       }, 500);
     });
@@ -1537,8 +1832,17 @@ function bindMessageGestures(root) {
         longPressTimer = null;
       });
     });
+    article.addEventListener("click", (event) => {
+      if (event.target.closest?.("button, a")) return;
+      event.preventDefault();
+      if (longPressTriggered) {
+        longPressTriggered = false;
+        return;
+      }
+      showMessageActionMenu(root, message, event.clientX, event.clientY);
+    });
     article.addEventListener("contextmenu", (event) => {
-      if (event.target.closest?.("button, a, video")) return;
+      if (event.target.closest?.("button, a")) return;
       event.preventDefault();
       showMessageActionMenu(root, message, event.clientX, event.clientY);
     });
@@ -1596,6 +1900,13 @@ function bindChatItemEvents(root) {
   root.querySelectorAll(".chat-item").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const chatId = btn.dataset.chatId;
+      if (String(state.selectedId) === String(chatId)) {
+        root.querySelector("#sidebar")?.classList.remove("open");
+        const backdrop = root.querySelector("#backdrop");
+        if (backdrop) backdrop.hidden = true;
+        return;
+      }
+      const selectionGeneration = ++chatSelectionGeneration;
       if (state.messagesChatId && state.messagesChatId !== String(chatId)) clearMessageMediaCache();
       state.selectedId = chatId;
       state.activeSection = "chat";
@@ -1608,15 +1919,168 @@ function bindChatItemEvents(root) {
       state.messagesError = "";
       state.chatDraft = "";
       state.replyToMessage = null;
+      state.stickerPickerOpen = false;
+      state.stickerPickerSearch = "";
       state.chatSending = state.sendingChatIds.has(String(chatId));
       paint(root);
+      root.querySelector("#sidebar")?.classList.remove("open");
+      const backdrop = root.querySelector("#backdrop");
+      if (backdrop) backdrop.hidden = true;
       await Promise.allSettled([loadChat(chatId), loadMessages(chatId)]);
-      if (state.selectedId !== chatId) return;
+      if (selectionGeneration !== chatSelectionGeneration || String(state.selectedId) !== String(chatId)) return;
       if (state.activeSection === "settings" && state.activeTab === "ai") await loadAiMetadata(chatId);
       paint(root);
       if (state.activeSection === "chat") scrollChatToBottom(root);
     });
   });
+}
+
+function normalizeOutgoingMessage(response) {
+  const message = response?.message ?? response;
+  return {
+    ...message,
+    sender_name: message?.sender_name || message?.user_name || "Бот",
+    is_bot: true,
+    is_own_bot: true,
+    is_outgoing: true,
+  };
+}
+
+function appendOutgoingMessages(sentMessages) {
+  const knownIds = new Set(state.messages.map((message) => String(message.message_id)));
+  const normalized = sentMessages.map(normalizeOutgoingMessage);
+  state.messages = [
+    ...state.messages,
+    ...normalized.filter((message) => !knownIds.has(String(message.message_id))),
+  ];
+  state.messagesChatId = String(state.selectedId);
+  state.messagesError = "";
+  enteringMessageIds = new Set(normalized.map((message) => String(message.message_id)));
+}
+
+function finishSendingForChat(chatId) {
+  state.sendingChatIds.delete(String(chatId));
+  state.chatSending = state.sendingChatIds.has(String(state.selectedId));
+}
+
+async function sendStickerFromPicker(root, sticker) {
+  const chatId = state.selectedId;
+  if (chatId === null || state.chatSending || !sticker.file_id || !sticker.set_name) return;
+  const replyMessage = state.replyToMessage;
+  const chatKey = String(chatId);
+  state.sendingChatIds.add(chatKey);
+  state.chatSending = true;
+  state.stickerPickerOpen = false;
+  paint(root);
+  try {
+    const response = await api.sendSticker(
+      chatId,
+      sticker,
+      replyMessage?.message_id || null,
+    );
+    finishSendingForChat(chatId);
+    if (String(state.selectedId) !== String(chatId)) return;
+    state.replyToMessage = null;
+    appendOutgoingMessages([response]);
+    rememberSticker(sticker);
+    paint(root);
+    enteringMessageIds.clear();
+    scrollChatToBottom(root);
+    void refreshChatList(root);
+  } catch (error) {
+    finishSendingForChat(chatId);
+    if (String(state.selectedId) === String(chatId)) {
+      state.stickerPickerOpen = true;
+      paint(root);
+    }
+    toast(error instanceof Error ? error.message : "Не удалось отправить стикер.", "error");
+  }
+}
+
+async function sendSavedGifFromPicker(root, gifId) {
+  const chatId = state.selectedId;
+  if (chatId === null || state.chatSending || !gifId) return;
+  const replyMessage = state.replyToMessage;
+  const chatKey = String(chatId);
+  state.sendingChatIds.add(chatKey);
+  state.chatSending = true;
+  state.stickerPickerOpen = false;
+  paint(root);
+  try {
+    const response = await api.sendSavedGif(chatId, gifId, replyMessage?.message_id || null);
+    finishSendingForChat(chatId);
+    if (String(state.selectedId) !== String(chatId)) return;
+    state.replyToMessage = null;
+    appendOutgoingMessages([response]);
+    paint(root);
+    enteringMessageIds.clear();
+    scrollChatToBottom(root);
+    void refreshChatList(root);
+  } catch (error) {
+    finishSendingForChat(chatId);
+    if (String(state.selectedId) === String(chatId)) {
+      state.stickerPickerOpen = true;
+      paint(root);
+    }
+    toast(error instanceof Error ? error.message : "Не удалось отправить GIF.", "error");
+  }
+}
+
+async function sendSelectedFiles(root, fileList) {
+  const files = Array.from(fileList || []);
+  const chatId = state.selectedId;
+  if (!files.length || chatId === null || state.chatSending) return;
+
+  const caption = state.chatDraft.trim();
+  const replyMessage = state.replyToMessage;
+  const chatKey = String(chatId);
+  state.sendingChatIds.add(chatKey);
+  state.chatSending = true;
+  const fileInput = root.querySelector("#chat-file-input");
+  if (fileInput) fileInput.value = "";
+  paint(root);
+
+  const sentMessages = [];
+  let sendError = null;
+  for (let index = 0; index < files.length; index += 1) {
+    try {
+      const response = await api.sendMedia(chatId, files[index], {
+        caption: index === 0 ? caption : "",
+        replyToMessageId: replyMessage?.message_id || null,
+      });
+      sentMessages.push(response);
+      if (index === 0 && String(state.selectedId) === String(chatId)) state.chatDraft = "";
+    } catch (error) {
+      sendError = error;
+      break;
+    }
+  }
+
+  finishSendingForChat(chatId);
+  if (String(state.selectedId) !== String(chatId)) {
+    if (sendError) toast(sendError instanceof Error ? sendError.message : "Не удалось отправить файл.", "error");
+    return;
+  }
+  if (sentMessages.length) {
+    state.replyToMessage = null;
+    appendOutgoingMessages(sentMessages);
+  } else {
+    state.chatDraft = caption;
+    state.replyToMessage = replyMessage;
+  }
+  paint(root);
+  enteringMessageIds.clear();
+  if (sentMessages.length) {
+    scrollChatToBottom(root);
+    void refreshChatList(root);
+  }
+  if (sendError) {
+    const sentCount = sentMessages.length;
+    const detail = sendError instanceof Error ? sendError.message : "Ошибка отправки.";
+    toast(sentCount ? `Отправлено ${sentCount} из ${files.length}; остальные файлы не отправлены. ${detail}` : detail, "error");
+  } else if (files.length > 1) {
+    toast(`Отправлено файлов: ${sentMessages.length}`);
+  }
 }
 
 async function jumpToReplyTarget(root, messageId, trigger) {
@@ -1687,6 +2151,20 @@ function bindEvents(root) {
 
   bindChatGroupToggles(root);
   bindChatItemEvents(root);
+  bindStickerPickerEvents(root);
+
+  root.querySelector("[data-attach-file]")?.addEventListener("click", () => {
+    if (!state.chatSending) root.querySelector("#chat-file-input")?.click();
+  });
+  root.querySelector("#chat-file-input")?.addEventListener("change", (event) => {
+    void sendSelectedFiles(root, event.currentTarget.files);
+  });
+  root.querySelector("[data-toggle-stickers]")?.addEventListener("click", () => {
+    if (state.chatSending) return;
+    state.stickerPickerOpen = !state.stickerPickerOpen;
+    paint(root);
+    if (state.stickerPickerOpen && !state.stickerLibrary) void loadStickerLibrary(root);
+  });
 
   root.querySelectorAll(".section-tab").forEach((btn) => {
     btn.addEventListener("click", async () => {
